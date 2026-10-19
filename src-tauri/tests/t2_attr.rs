@@ -568,7 +568,7 @@ fn reassign_range_backfills_only_inside_and_survives_replay() {
 
 // 9. v1 → v2 迁移：存量记录保留且 profile_id = NULL（Unknown），新表可用
 #[test]
-fn migrates_v1_database_to_v2() {
+fn migrates_v1_database_forward_to_v3() {
     let dir = TempDir::new();
     let db_path = dir.path().join("legacy.sqlite3");
     {
@@ -605,13 +605,26 @@ fn migrates_v1_database_to_v2() {
         .unwrap();
     }
 
+    // v3（D22 修订）：旧口径数据整体挪入 usage_records_legacy 保留不销毁，
+    // 新 usage_records 为空（等 checkpoint 清空后的全量重扫按 message.id
+    // 身份重建），孤儿历史不进聚合但可追溯。
     let mut store = Store::open(&db_path).unwrap();
-    assert_eq!(store.count_records().unwrap(), 1, "存量记录不得丢失");
-    assert_eq!(
-        store.record_profiles().unwrap(),
-        vec![("legacy-1".to_string(), None)],
-        "存量记录迁移后归 Unknown"
-    );
+    assert_eq!(store.count_records().unwrap(), 0, "新表为空待重扫");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let legacy: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_records_legacy", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(legacy, 1, "旧口径存量保留在 legacy 表");
+        let checkpoints: i64 = conn
+            .query_row("SELECT COUNT(*) FROM file_checkpoints", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(checkpoints, 0, "checkpoint 已清空触发全量重扫");
+    }
 
     // 迁移后的库可正常应用快照
     apply(&mut store, Some("https://a.example.com"), None, 2_000);
@@ -622,7 +635,7 @@ fn migrates_v1_database_to_v2() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 }
 
 // 10. R2-2 手动额度三列：默认 NULL、整体覆盖、未知档案不命中

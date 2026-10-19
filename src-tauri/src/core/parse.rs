@@ -4,6 +4,8 @@
 //! （完整行 / 忽略 / 坏行）。字段映射与语义以
 //! docs/data-source/claude-code-jsonl.md 为准（D22 定案）：
 //! - 只处理 `type == "assistant"` 且带 `message.usage` 的行，其余忽略且不计坏行；
+//! - 逻辑身份 = `message.id` →（缺失回退）`requestRef` →（再回退）`uuid`
+//!   （一次回复按 content block 写多行、各复制整轮 usage，必须按调用去重）；
 //! - 四项 usage 判定（契约「四项判定」）：至少一项存在且为非负整数 → 入库，
 //!   缺失项补 0；四项均缺失，或任一存在的字段非数字/为负 → 坏行；
 //! - uuid/session/timestamp 无效 → 坏行；
@@ -74,12 +76,25 @@ pub fn parse_line(line: &[u8]) -> ParsedLine {
         return ParsedLine::Bad;
     };
 
-    let Some(record_id) = obj.get("uuid").and_then(Value::as_str) else {
+    let Some(record_uuid) = obj.get("uuid").and_then(Value::as_str) else {
         return ParsedLine::Bad;
     };
-    if record_id.is_empty() {
+    if record_uuid.is_empty() {
         return ParsedLine::Bad;
     }
+    // D22 修订（2026-10-19 口径 bug）：一次 assistant 回复按 content block
+    // 写多行、每行复制整轮 usage——行级 uuid 会按块数放大计量（实测虚高
+    // ~2.4 倍）。逻辑身份 = message.id（一次 API 调用），缺失回退
+    // requestRef（重试各计的保守回退），再回退 uuid（老 schema 行）。
+    let record_id = obj
+        .get("message")
+        .and_then(|m| m.get("id"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| obj.get("requestRef").and_then(Value::as_str))
+        .filter(|s| !s.is_empty())
+        .unwrap_or(record_uuid)
+        .to_string();
     let session_id = obj
         .get("session_id")
         .and_then(Value::as_str)
@@ -363,6 +378,32 @@ mod tests {
         assert_eq!(r.cwd.as_deref(), Some("/tmp/proj"));
         assert_eq!(r.cc_version.as_deref(), Some("2.1.303"));
         assert_eq!(r.total_tokens(), 51_900);
+    }
+
+    #[test]
+    fn record_id_uses_message_id_with_fallback_chain() {
+        let usage = usage(json!(100), json!(20), json!(5000), json!(0));
+        // message.id 存在 → 逻辑身份 = message.id（D22 修订）
+        let line = assistant_line(
+            json!({"id": "msg_abc", "usage": usage}),
+            json!({"requestRef": "ref-1"}),
+        );
+        let ParsedLine::Record(r) = parse_line(&line) else {
+            panic!()
+        };
+        assert_eq!(r.record_id, "msg_abc");
+        // message.id 缺失 → 回退 requestRef
+        let line = assistant_line(json!({"usage": usage}), json!({"requestRef": "ref-2"}));
+        let ParsedLine::Record(r) = parse_line(&line) else {
+            panic!()
+        };
+        assert_eq!(r.record_id, "ref-2");
+        // 两者都缺 → 回退 uuid（老 schema 行为）
+        let line = assistant_line(json!({"usage": usage}), json!({}));
+        let ParsedLine::Record(r) = parse_line(&line) else {
+            panic!()
+        };
+        assert_eq!(r.record_id, "11111111-1111-4111-8111-111111111111");
     }
 
     #[test]

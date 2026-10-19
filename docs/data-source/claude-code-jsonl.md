@@ -26,7 +26,7 @@ mode / permission-mode / file-history-snapshot / cost-state / …）。**只有
 
 | 契约字段 | JSONL 来源 | 说明 |
 |---|---|---|
-| record_id | `uuid` | 每行唯一身份（probe：922 条 0 重复）。去重/UPSERT 主键 |
+| record_id | `message.id` →（缺失回退）`requestRef` →（再回退）`uuid` | **逻辑身份（2026-10-19 修订）**：一次 assistant 回复按 content block 写多行、每行复制整轮 usage，行级 uuid 会按块数放大计量（实测虚高 ~2.4 倍）；message.id 是一次 API 调用的身份，多块共享 |
 | session_id | `session_id`，缺失回退 `sessionId` | 两字段并存同值（新旧 schema），优先前者 |
 | timestamp | `timestamp` | ISO-8601 UTC（`2026-10-19T10:03:45.883Z`），解析失败则跳过该行 |
 | input_tokens | `message.usage.input_tokens` | 直读，四项之一 |
@@ -48,9 +48,11 @@ mode / permission-mode / file-history-snapshot / cost-state / …）。**只有
 input/output 无 cache 字段，属合法观测——若判坏行，D17 的「跳过 N 行」信号会被
 这些占位行主导，制造假警报。cache 缺失 = 无缓存计费，补 0 语义正确。
 
-## 更新语义定案（D22）
+## 更新语义定案（D22，2026-10-19 修订）
 
-- **逻辑记录身份 = `uuid`**（单列主键，全局唯一，跨文件去重）
+- **逻辑记录身份 = `message.id`（回退 `requestRef`，再回退 `uuid`）**
+  （单列主键，跨文件去重；uuid 仅为老 schema 兜底——它每行唯一、
+  无法折叠同一次调用的多个 content block）
 - **版本优先级 = 后到者胜**：JSONL 只追加，同 uuid 再出现时，文件中位置靠后的行
   是更新态；跨文件（resume 场景）按导入顺序后者胜
 - **UPSERT（REPLACE 语义），绝不累加**：同 uuid 重放不产生第二次计量——这是

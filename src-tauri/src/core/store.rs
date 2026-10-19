@@ -21,7 +21,7 @@ use super::parse::UsageRecord;
 use super::CoreError;
 
 /// 当前 schema 版本。加表/改表时递增并在 migrate 里追加版本迁移分支。
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// 每条 SQL 事务提交的用量记录条数
 pub const UPSERT_BATCH: usize = 500;
@@ -224,6 +224,41 @@ impl Store {
             let tx = self.conn.transaction()?;
             tx.execute_batch(SCHEMA_V2)?;
             tx.execute_batch("PRAGMA user_version = 2;")?;
+            tx.commit()?;
+        }
+        if version < 3 {
+            let tx = self.conn.transaction()?;
+            // D22 修订：行级 uuid 身份按 content block 放大计量。主键换
+            // message.id 身份；旧表整体保留为 usage_records_legacy（已删
+            // 源文件的孤儿历史不销毁，但不进任何聚合）。清空 checkpoints
+            // 强制全量重扫（UPSERT 幂等）。旧表索引随 RENAME 保留原名，
+            // 需先 DROP 才能为新表重建同名索引。
+            tx.execute_batch(
+                "DROP INDEX IF EXISTS idx_usage_records_timestamp;
+                 DROP INDEX IF EXISTS idx_usage_records_session;
+                 DROP INDEX IF EXISTS idx_usage_records_profile;
+                 ALTER TABLE usage_records RENAME TO usage_records_legacy;
+                 CREATE TABLE usage_records (
+                     record_id             TEXT PRIMARY KEY NOT NULL,
+                     session_id            TEXT NOT NULL,
+                     timestamp_ms          INTEGER NOT NULL,
+                     input_tokens          INTEGER NOT NULL,
+                     output_tokens         INTEGER NOT NULL,
+                     cache_read_tokens     INTEGER NOT NULL,
+                     cache_creation_tokens INTEGER NOT NULL,
+                     model                 TEXT NOT NULL,
+                     entrypoint            TEXT NOT NULL,
+                     is_sidechain          INTEGER NOT NULL,
+                     cwd                   TEXT,
+                     cc_version            TEXT,
+                     profile_id            INTEGER REFERENCES profiles(id)
+                 );
+                 CREATE INDEX idx_usage_records_timestamp ON usage_records(timestamp_ms);
+                 CREATE INDEX idx_usage_records_session ON usage_records(session_id);
+                 CREATE INDEX idx_usage_records_profile ON usage_records(profile_id);
+                 DELETE FROM file_checkpoints;
+                 PRAGMA user_version = 3;",
+            )?;
             tx.commit()?;
         }
         Ok(())

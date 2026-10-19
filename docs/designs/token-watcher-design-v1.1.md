@@ -272,7 +272,7 @@ vitest 推迟至 v0.2 UI 逻辑增重时再议。fixture 定案先于存储实�
 | D19 | agy 复审用新会话（独立性保证） |
 | D20 | 归因歧义归 Unknown + 切换宽限期 + fixture 验收 |
 | D21 | 先注册 watcher 再枚举 + 恢复 mtime/size 对账 |
-| D22 | 逻辑记录身份=uuid + 后到者胜 + UPSERT 不累加；fixture 定案先于存储实现 |
+| D22 | 逻辑记录身份 + 后到者胜 + UPSERT 不累加；fixture 定案先于存储实现。**2026-10-19 修订**：身份从 uuid 改为 message.id（回退 requestRef/uuid）——实测发现一次回复按 content block 写多行各复制整轮 usage，行级 uuid 按块数放大计量 ~2.4 倍；schema v3 迁移（旧数据保留 usage_records_legacy，全量重扫重建） |
 | D23 | 归因诚实降级（Unknown 主导+低置信标签）；档案=持久 ID+端点/凭据映射；本地代理模式提至 v0.2 首位 |
 
 事实修正（非决策，观测更正）：到达脉冲叙事；Windows 托盘静态图标；

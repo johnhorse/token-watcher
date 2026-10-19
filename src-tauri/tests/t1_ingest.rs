@@ -366,3 +366,80 @@ fn today_totals_use_local_midnight() {
     assert_eq!(todays.cache_read, 0);
     assert_eq!(todays.cache_creation, 0);
 }
+
+/// D22 修订回归（2026-10-19 口径 bug）：一次 assistant 回复按 content block
+/// 写多行（各带不同 uuid、复制整轮相同 usage）——必须按 message.id 去重
+/// 成一条，绝不按块数放大计量。
+#[test]
+fn multi_block_reply_collapses_to_one_record() {
+    let dir = TempDir::new();
+    let path = dir.path().join("blocks.jsonl");
+    // 调用 A：3 个 content block = 3 行，同 msgId、同 usage、不同 uuid
+    let lines = [
+        usage_line(
+            "blk-1",
+            "s1",
+            "2026-10-19T10:00:00.000Z",
+            1000,
+            200,
+            50000,
+            0,
+        ),
+        usage_line(
+            "blk-2",
+            "s1",
+            "2026-10-19T10:00:00.100Z",
+            1000,
+            200,
+            50000,
+            0,
+        ),
+        usage_line(
+            "blk-3",
+            "s1",
+            "2026-10-19T10:00:00.200Z",
+            1000,
+            200,
+            50000,
+            0,
+        ),
+    ];
+    // 调用 B：单行，独立 msgId
+    let mut body: Vec<String> = lines
+        .iter()
+        .map(|l| {
+            let mut v: serde_json::Value = serde_json::from_str(l).unwrap();
+            v["message"]["id"] = json!("msg_A");
+            v.to_string()
+        })
+        .collect();
+    let mut b: serde_json::Value = serde_json::from_str(&usage_line(
+        "blk-4",
+        "s1",
+        "2026-10-19T10:01:00.000Z",
+        10,
+        5,
+        700,
+        0,
+    ))
+    .unwrap();
+    b["message"]["id"] = json!("msg_B");
+    body.push(b.to_string());
+    fs::write(&path, body.join("\n") + "\n").unwrap();
+
+    let db = dir.path().join("blocks.db");
+    let mut store = Store::open(&db).unwrap();
+    ingest::scan_dir(&mut store, dir.path()).unwrap();
+
+    let count: i64 = store.count_records().unwrap();
+    assert_eq!(count, 2, "3 块回复应归并为 1 条 + 独立调用 1 条");
+    let totals = all_time_totals(&store);
+    assert_eq!(totals.input, 1010);
+    assert_eq!(totals.output, 205);
+    assert_eq!(totals.cache_read, 50700);
+    assert_eq!(
+        totals.total(),
+        51_915,
+        "总量 = 调用 A 一份 + 调用 B，不按块放大"
+    );
+}
