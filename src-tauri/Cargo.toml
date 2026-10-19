@@ -5,12 +5,20 @@ description = "Cross-platform AI token usage monitor for Claude Code — menu ba
 authors = ["johnhorse"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.82"
+# 依赖树里的 tauri 2.12 / tray-icon / muda 要求 Rust >= 1.90
+rust-version = "1.90"
+repository = "https://github.com/johnhorse/token-watcher"
+readme = "../README.md"
+keywords = ["claude-code", "token-usage", "tauri", "monitor", "desktop"]
+categories = ["gui", "visualization", "development-tools"]
+# 双 bin 场景下显式声明主 bin（Tauri CLI 也按此/包名识别打包目标）
+default-run = "token-watcher"
 
 # D14: 单 crate 双 bin —— GUI 主程序 + tw-ingest 开发工具，core 经显式 [lib] 共享
 [lib]
 name = "token_watcher_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 仅桌面（macOS/Windows）分发：bin 以 rlib 链接；staticlib/cdylib 是移动端打包要求
+crate-type = ["rlib"]
 
 [[bin]]
 name = "token-watcher"

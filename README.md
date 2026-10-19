@@ -34,14 +34,16 @@ v0.1 尚未发布。发布后从 [GitHub Releases](https://github.com/johnhorse/
 
 ## 本地构建
 
-要求：Rust stable、Node.js ≥ 20、npm。
+要求：Rust stable（≥ 1.90）、Node.js ≥ 20、npm。
 
 ```bash
-cd ui
-npm install
-npm run tauri dev      # 开发模式（热更新）
-npm run tauri build    # 产出安装包
+npm --prefix ui install            # 安装前端依赖
+npm --prefix ui exec tauri dev     # 开发模式（热更新）
+npm --prefix ui exec tauri build   # 产出安装包（构建前会自动执行 ui 的 npm run build）
 ```
+
+> Tauri CLI 必须从仓库根目录运行（它在根目录下定位 `src-tauri/tauri.conf.json`）；
+> `beforeBuildCommand` 的 `npm run build` 由 CLI 在 `ui/` 目录下执行。
 
 数据层验证工具（开发用，不入安装包）：
 
