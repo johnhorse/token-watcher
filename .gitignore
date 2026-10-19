@@ -1,0 +1,16 @@
+# Rust
+src-tauri/target/
+src-tauri/gen/
+
+# Node
+ui/node_modules/
+ui/dist/
+
+# 系统 / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# 本地环境
+*.local
+.env
