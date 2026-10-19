@@ -96,12 +96,67 @@ impl EventSink for TauriSink {
     }
 
     fn emit_json(&self, event: &str, payload: Value) {
-        let _ = self.app.emit(event, payload);
+        let _ = self.app.emit(event, &payload);
+        // Phase 3：同步状态快照（get_scan_status 的数据源）
+        if matches!(event, "scan-progress" | "data-health") {
+            if let Some(state) = self.app.try_state::<crate::AppState>() {
+                if let Ok(mut snap) = state.status.lock() {
+                    match event {
+                        "scan-progress" => {
+                            snap.phase = payload
+                                .get("phase")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string();
+                            snap.files_done = payload
+                                .get("files_done")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0);
+                            snap.files_total = payload
+                                .get("files_total")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0);
+                            snap.percent = payload
+                                .get("percent")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0);
+                        }
+                        _ => {
+                            snap.health.root_unreadable = payload
+                                .get("root_unreadable")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            snap.health.skipped_files = payload
+                                .get("skipped_files")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0);
+                            snap.health.db_readonly = payload
+                                .get("db_readonly")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn data_changed(&self) {
         let _ = self.tray_tx.send(TrayCommand::DataChanged);
     }
+}
+
+/// 引擎公开状态快照（get_scan_status 数据源）。
+/// 由 TauriSink 在发 scan-progress / data-health 事件时同步更新，
+/// 兜住「事件早于前端监听就绪」的窗口。
+#[derive(Debug, Clone, Default)]
+pub struct ScanPublicStatus {
+    /// "" = 启动前；scanning / done / empty（与 scan-progress 事件一致）
+    pub phase: String,
+    pub files_done: u64,
+    pub files_total: u64,
+    pub percent: f64,
+    pub health: DataHealth,
 }
 
 /// D17 三档错误态（仅状态变化时发）
@@ -797,6 +852,16 @@ impl DataHandle {
         let _ = self.tx.send(Message::Shutdown);
         if let Some(join) = self.join.take() {
             let _ = join.join();
+        }
+    }
+
+    /// 秒退（Phase 3）：发 Shutdown 后不 join 数据线程（首扫大历史时
+    /// join 最坏 ~18s，退出不该等它）。进程退出由 OS 回收线程；已提交
+    /// 事务由 WAL 保证，未推进的 checkpoint 下次重读走 UPSERT 幂等。
+    pub fn detach(&mut self) {
+        let _ = self.tx.send(Message::Shutdown);
+        if let Some(join) = self.join.take() {
+            std::mem::forget(join);
         }
     }
 }

@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 
 use super::attr::{self, ApplyOutcome, Interval, Profile, ProfileId, SettingsSnapshot, Timeline};
 use super::parse::UsageRecord;
@@ -166,6 +166,30 @@ impl Store {
     /// 内存库（测试用）
     pub fn open_in_memory() -> Result<Self, CoreError> {
         Self::init(Connection::open_in_memory()?)
+    }
+
+    /// 只读连接（Phase 3 command 查询用）：不跑迁移、不建目录，
+    /// 避免与数据线程的初始化竞态；查询失败按 fetch 失败呈现。
+    pub fn open_readonly(path: &Path) -> Result<Self, CoreError> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        Ok(Self { conn })
+    }
+
+    /// 编辑档案显示名（T6 手动修正 UI 入口）。返回是否命中档案。
+    pub fn update_profile_display(
+        &mut self,
+        profile_id: i64,
+        display_name: &str,
+    ) -> Result<bool, CoreError> {
+        let changed = self.conn.execute(
+            "UPDATE profiles SET display_name = ?2 WHERE id = ?1",
+            params![profile_id, display_name],
+        )?;
+        Ok(changed > 0)
     }
 
     fn init(conn: Connection) -> Result<Self, CoreError> {

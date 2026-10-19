@@ -5,7 +5,7 @@
   "identifier": "io.github.johnhorse.token-watcher",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://localhost:5175",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../ui/dist"
   },

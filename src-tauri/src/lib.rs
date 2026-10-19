@@ -14,6 +14,7 @@
 
 pub mod app_lock;
 pub mod app_settings;
+pub mod commands;
 pub mod core;
 pub mod tray;
 pub mod watch;
@@ -25,12 +26,18 @@ use tauri::{Manager, RunEvent, WindowEvent};
 
 use app_lock::{AppLock, LockError};
 use app_settings::AppSettings;
-use watch::{DataHandle, DataPaths};
+use watch::{DataHandle, DataPaths, ScanPublicStatus};
 
-struct AppState {
+pub struct AppState {
     /// 进程生命周期内持有的写者锁（Drop 时释放）
     _lock: Mutex<Option<AppLock>>,
     data: Mutex<Option<DataHandle>>,
+    /// 引擎状态快照（get_scan_status 数据源，TauriSink 同步更新）
+    pub status: Mutex<ScanPublicStatus>,
+    /// command 查询用只读连接（lazy，首扫完成后才建立）
+    pub store: Mutex<Option<core::store::Store>>,
+    /// 只读连接的目标路径
+    pub db_path: std::path::PathBuf,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -89,10 +96,14 @@ pub fn run() {
                     mpsc::channel().0
                 }
             };
+            let db_path = paths.db_path.clone();
             let data = watch::spawn(app.handle().clone(), paths, tray_tx);
             app.manage(AppState {
                 _lock: Mutex::new(Some(lock)),
                 data: Mutex::new(Some(data)),
+                status: Mutex::new(ScanPublicStatus::default()),
+                store: Mutex::new(None),
+                db_path,
             });
             Ok(())
         })
@@ -112,6 +123,13 @@ pub fn run() {
                 }
             }
         })
+        .invoke_handler(tauri::generate_handler![
+            commands::get_dashboard,
+            commands::get_scan_status,
+            commands::update_profile_display,
+            commands::update_profile_quota,
+            commands::reassign_usage,
+        ])
         .build(tauri::generate_context!());
 
     match result {
@@ -120,7 +138,7 @@ pub fn run() {
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     if let Ok(mut guard) = state.data.lock() {
                         if let Some(mut data) = guard.take() {
-                            data.shutdown();
+                            data.detach();
                         }
                     }
                     if let Ok(mut guard) = state._lock.lock() {
