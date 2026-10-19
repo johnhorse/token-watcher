@@ -12,6 +12,8 @@
 
 ### `get_scan_status() -> ScanStatus`
 启动时/收到 `scan-progress` 前主动查询一次（防事件早于前端监听就绪）。
+返回体并入 data-health 三字段（root_unreadable / skipped_files /
+db_readonly）——初始错误态与进度同源拉取，不依赖事件补发。
 
 ### `update_profile_display(profile_id: i64, display_name: string) -> ()`
 编辑档案显示名。
@@ -39,6 +41,10 @@
   "db_readonly": false }
 ```
 三档独立呈现：不可读横幅 / 「跳过 N 文件」计数 / 只读降级横幅。
+
+### fetch 失败态（T6 补充）
+command 调用失败（非 D17 三档的 IPC/未知错误）→ UI 显示通用错误横幅
+（i18n「数据暂时不可用」类文案 + 重试由下一次事件自然触发），不静默停在骨架。
 
 ### `dashboard-dirty`
 无 payload。语义：聚合结果已变化（增量落库后聚合刷新），UI 防抖（~500ms）
@@ -103,4 +109,7 @@ T7 实现固化的补充语义（主 session 采纳）：
 1. 前端就绪 → `get_scan_status()`：`scanning` 则进入首扫骨架态并订阅事件；
 2. `scan-progress(done)` / 首次 `dashboard-dirty` → 拉取 `get_dashboard` 无缝切换；
 3. 运行期：`usage-pulse` 累计折线；`dashboard-dirty` 防抖重拉大数字/分布/卡片/列表；
-4. 任何时刻 `data-health` 更新三档错误态呈现。
+4. 任何时刻 `data-health` 更新三档错误态呈现；
+5. 窗口可见性由 Rust 侧监听（无 UI 命令）：隐藏暂停事件推送、显示发
+   `dashboard-dirty` 触发水合（T3/T4 实现）；quota 数值 v0.1 单位为
+   token 数（周期语义 v0.2 自动配额时再引入）。
