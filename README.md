@@ -60,6 +60,10 @@ cargo test                  # 单元 + fixture 集成测试
 - [Claude Code JSONL 数据源契约](docs/data-source/claude-code-jsonl.md)
 - [线框图](docs/designs/assets/token-watcher-wireframe-20261019.png)
 
+> **字体说明**：UI 声明了 Archivo（Latin）与 Fragment Mono（数字）字体名并回退
+> 系统字体栈（PingFang SC / Microsoft YaHei UI 等），正式字体文件尚未打包——
+> 当前视觉为系统栈渲染，待图标与字体设计定稿后随安装包分发。
+
 ## License
 
 MIT
