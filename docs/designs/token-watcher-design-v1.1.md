@@ -215,6 +215,8 @@ vitest 推迟至 v0.2 UI 逻辑增重时再议。fixture 定案先于存储实�
 4. 激活会话 5 分钟阈值、并行「取最近 vs 求和」——实装后按体感调
 5. 同 base URL 多 key：v0.1 指纹次级键（AUTH_TOKEN/API_KEY 已设置者）；
    代理模式（v0.2 首位）是彻底解法
+6. `~/.claude` 根目录在启动后才创建的场景（v0.1 watcher 无法感知根目录出现，
+   仅 projects 子目录动态补监听）——极端边界，v0.2 评估根目录轮询兜底
 
 ## Success Criteria（v0.1 验收硬指标）
 
