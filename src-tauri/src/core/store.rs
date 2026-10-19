@@ -205,6 +205,12 @@ impl Store {
         Ok(())
     }
 
+    /// T7：聚合层只读访问连接。聚合 SQL 留在 agg 模块内，
+    /// 避免存储层混入展示形状（Dashboard 查询不向 store.rs 扩散）。
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     /// 批量 UPSERT 用量记录。同 record_id 后到者胜，绝不累加。
     /// 每 [`UPSERT_BATCH`] 条一个事务，避免长事务锁库与崩溃丢整批。
     /// 落库前按当前时间线物化归因（T2）：`profile_id` 为 NULL 即 Unknown。

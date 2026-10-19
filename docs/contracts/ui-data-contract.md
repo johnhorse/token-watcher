@@ -90,6 +90,14 @@ interface SessionRow {
 口径一致性（SC7）：`totals.total` ≡ 菜单栏「今日累计」回退态数字（同一 SQL
 口径）；四项定义与数据源契约一致。
 
+T7 实现固化的补充语义（主 session 采纳）：
+- **空档不呈现**：models / profiles / sessions（含 Unknown 卡）tokens=0 时
+  不出现在列表——有数据才呈现，避免空卡噪音
+- **range 语义**：`week`/`month` = 含今天在内 7/30 个**本地日历日**（非滚动
+  7×24h），保证 today ⊂ week ⊂ month 且日内数字不漂移
+- **Unknown 卡本地化**：UI 侧按 `profile_id == null` 判定 Unknown 并取
+  i18n 文案，不依赖 Rust 返回的 `"Unknown"` 字面量
+
 ## 状态机（UI 启动序）
 
 1. 前端就绪 → `get_scan_status()`：`scanning` 则进入首扫骨架态并订阅事件；
