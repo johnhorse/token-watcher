@@ -6,16 +6,25 @@
 //! - 单实例守卫（D15，插件）：第二实例唤起主窗后退出（插件必须最先注册）；
 //! - 写者互斥（F5，文件锁）：GUI 是唯一 ingestion owner；tw-ingest 拿不到锁时只读；
 //! - 后台数据线程：首扫（进度推送）→ fs 事件驱动增量 → 契约事件推送。
+//!
+//! T5 托盘：
+//! - macOS 菜单栏 title 数字 / Windows 静态图标 + tooltip + 左键弹窗；
+//! - 指标可配置（settings.json），数字与 UI 同源（agg::tray_metric）；
+//! - 数据线程落库 → 内部 channel 通知托盘刷新（60s 兜底）。
 
 pub mod app_lock;
+pub mod app_settings;
 pub mod core;
+pub mod tray;
 pub mod watch;
 
+use std::sync::mpsc;
 use std::sync::Mutex;
 
 use tauri::{Manager, RunEvent, WindowEvent};
 
 use app_lock::{AppLock, LockError};
+use app_settings::AppSettings;
 use watch::{DataHandle, DataPaths};
 
 struct AppState {
@@ -64,7 +73,23 @@ pub fn run() {
                     std::process::exit(1);
                 }
             };
-            let data = watch::spawn(app.handle().clone(), paths);
+            // T5：托盘（复用 tauri.conf.json 创建的图标，挂菜单/事件/刷新线程）。
+            // 托盘失败不阻塞数据管道：用断开通道降级，窗口仍可用。
+            let settings_path = app_settings::path_for_db(&paths.db_path);
+            let settings = AppSettings::load(&settings_path);
+            let tray_tx = match tray::setup(
+                app.handle(),
+                &settings_path,
+                &paths.db_path,
+                settings.tray_metric,
+            ) {
+                Ok(tx) => tx,
+                Err(e) => {
+                    eprintln!("[token-watcher] 托盘初始化失败: {e}");
+                    mpsc::channel().0
+                }
+            };
+            let data = watch::spawn(app.handle().clone(), paths, tray_tx);
             app.manage(AppState {
                 _lock: Mutex::new(Some(lock)),
                 data: Mutex::new(Some(data)),
@@ -76,6 +101,8 @@ pub fn run() {
             // 隐藏时的 emit 挂起由数据线程按 is_visible() 自行判断。
             if matches!(event, WindowEvent::Focused(true)) {
                 let app_handle = window.app_handle();
+                // T5：窗口可能被 single-instance 等菜单外路径显示 → 同步菜单文案
+                tray::sync_window_item_label(app_handle);
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     if let Ok(guard) = state.data.lock() {
                         if let Some(data) = guard.as_ref() {

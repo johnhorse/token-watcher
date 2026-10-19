@@ -29,6 +29,7 @@ use crate::core::attr::{self, ApplyOutcome, SettingsSnapshot};
 use crate::core::ingest;
 use crate::core::store::Store;
 use crate::core::CoreError;
+use crate::tray::TrayCommand;
 
 /// 增量事件聚合窗口（OQ4：与 5 分钟宽限/激活阈值一并按体感调）
 pub const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -75,10 +76,15 @@ pub trait EventSink: Send + 'static {
     /// 主窗口是否可见（隐藏时挂起 emit）
     fn is_visible(&self) -> bool;
     fn emit_json(&self, event: &str, payload: Value);
+    /// T5：数据落库后的内部通知（驱动托盘刷新）。
+    /// 默认 no-op：测试 MockSink 无需关心托盘。
+    fn data_changed(&self) {}
 }
 
 struct TauriSink {
     app: AppHandle,
+    /// T5：托盘刷新内部通道（与 UI emit 并行，窗口隐藏也照常通知）
+    tray_tx: Sender<TrayCommand>,
 }
 
 impl EventSink for TauriSink {
@@ -91,6 +97,10 @@ impl EventSink for TauriSink {
 
     fn emit_json(&self, event: &str, payload: Value) {
         let _ = self.app.emit(event, payload);
+    }
+
+    fn data_changed(&self) {
+        let _ = self.tray_tx.send(TrayCommand::DataChanged);
     }
 }
 
@@ -723,6 +733,8 @@ impl<S: EventSink> DataEngine<S> {
     }
 
     fn emit_dirty(&mut self) {
+        // T5：落库 → 托盘刷新（不受窗口可见性影响，隐藏时也更新菜单栏数字）
+        self.sink.data_changed();
         if self.sink.is_visible() {
             self.pending_dirty = false;
             self.sink.emit_json("dashboard-dirty", Value::Null);
@@ -796,9 +808,11 @@ impl Drop for DataHandle {
 }
 
 /// 启动后台数据线程（Tauri 接线用）
-pub fn spawn(app: AppHandle, paths: DataPaths) -> DataHandle {
+///
+/// `tray_tx`：T5 托盘刷新通知（数据落库后发送 [`TrayCommand::DataChanged`]）
+pub fn spawn(app: AppHandle, paths: DataPaths, tray_tx: Sender<TrayCommand>) -> DataHandle {
     let (tx, rx) = mpsc::channel();
-    let sink = TauriSink { app };
+    let sink = TauriSink { app, tray_tx };
     let engine_tx = tx.clone();
     let join = thread::Builder::new()
         .name("token-watcher-data".into())

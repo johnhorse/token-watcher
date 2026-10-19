@@ -20,7 +20,7 @@
       }
     ],
     "trayIcon": {
-      "iconPath": "icons/icon.png",
+      "iconPath": "icons/tray-template.png",
       "iconAsTemplate": true
     },
     "security": {
