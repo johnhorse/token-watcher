@@ -217,6 +217,9 @@ vitest 推迟至 v0.2 UI 逻辑增重时再议。fixture 定案先于存储实�
    代理模式（v0.2 首位）是彻底解法
 6. `~/.claude` 根目录在启动后才创建的场景（v0.1 watcher 无法感知根目录出现，
    仅 projects 子目录动态补监听）——极端边界，v0.2 评估根目录轮询兜底
+7. JSONL 删除后同路径重建且 size ≥ 旧 checkpoint 时，续读会跳过新文件前缀
+   （Claude Code 会话文件名含 UUID，路径碰撞概率可忽略；如需彻底处理可在
+   size==offset 且 mtime 更新时强制重扫）——T8 测试评审发现，暂记录
 
 ## Success Criteria（v0.1 验收硬指标）
 
