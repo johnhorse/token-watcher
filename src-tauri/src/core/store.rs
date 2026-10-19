@@ -1,22 +1,27 @@
 //! T1：SQLite 存储层
 //!
 //! - 建库/迁移：`PRAGMA user_version` 版本号，后续任务加表按版本递进；
-//! - `usage_records`：主键 `record_id`（uuid 单列），UPSERT REPLACE 语义、绝不累加（D22）；
+//! - `usage_records`：主键 `record_id`（uuid 单列），UPSERT 后到者胜、绝不累加（D22）；
 //! - `file_checkpoints`：每文件 `(byte_offset, mtime_ms, size)` 三元组；
 //! - 写入按批事务提交（默认 500 条/事务）；
 //! - 「今日」按本地时区 00:00 起算：时间戳存 UTC epoch 毫秒，边界换算交给
 //!   SQLite 的 `localtime`/`utc` 修饰符（DST 安全，不引第三方时区库）。
+//!
+//! T2 扩展（schema v2）：`profiles` + `profile_timeline` 订阅档案时间线；
+//! `usage_records.profile_id` 在写入时物化归因（NULL = Unknown），查询侧直接
+//! GROUP BY，无需 join。
 
 use std::path::Path;
 use std::time::Duration;
 
 use rusqlite::{params, Connection};
 
+use super::attr::{self, ApplyOutcome, Interval, Profile, ProfileId, SettingsSnapshot, Timeline};
 use super::parse::UsageRecord;
 use super::CoreError;
 
 /// 当前 schema 版本。加表/改表时递增并在 migrate 里追加版本迁移分支。
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// 每条 SQL 事务提交的用量记录条数
 pub const UPSERT_BATCH: usize = 500;
@@ -47,12 +52,59 @@ CREATE TABLE IF NOT EXISTS file_checkpoints (
 );
 "#;
 
+/// v2（T2）：订阅档案与归因时间线。
+/// 档案身份 = (endpoint, credential_fingerprint)；指纹为 SHA-256 前 8 位 hex，
+/// 鉴权原文永不入库。时间线区间半开 `[start_ms, end_ms)`，NULL end = 仍在使用。
+/// 存量 usage_records 的 profile_id 迁移后为 NULL（Unknown）。
+const SCHEMA_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS profiles (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    endpoint               TEXT NOT NULL,
+    credential_fingerprint TEXT,
+    display_name           TEXT NOT NULL,
+    created_at             INTEGER NOT NULL,
+    -- R2-2 手动额度（v0.1 纯手动口径）：NULL = 未配置，UI 不显示配额条
+    quota_manual_total     INTEGER,
+    quota_manual_used      INTEGER,
+    quota_reset_date       TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_identity
+    ON profiles(endpoint, COALESCE(credential_fingerprint, ''));
+
+CREATE TABLE IF NOT EXISTS profile_timeline (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER NOT NULL REFERENCES profiles(id),
+    start_ms   INTEGER NOT NULL,
+    end_ms     INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_profile_timeline_start ON profile_timeline(start_ms);
+
+ALTER TABLE usage_records ADD COLUMN profile_id INTEGER;
+CREATE INDEX IF NOT EXISTS idx_usage_records_profile ON usage_records(profile_id);
+"#;
+
+/// 后到者胜：字段整体取新值，绝不累加（D22）。
+/// `profile_id` 例外：已有非 NULL 值优先保留——手动修正（T6 回填）不会被
+/// 后续重扫/重放覆盖；只有从未归因（NULL）的记录才写入本次计算结果。
 const UPSERT_SQL: &str = r#"
-INSERT OR REPLACE INTO usage_records (
+INSERT INTO usage_records (
     record_id, session_id, timestamp_ms, input_tokens, output_tokens,
     cache_read_tokens, cache_creation_tokens, model, entrypoint,
-    is_sidechain, cwd, cc_version
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+    is_sidechain, cwd, cc_version, profile_id
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+ON CONFLICT(record_id) DO UPDATE SET
+    session_id            = excluded.session_id,
+    timestamp_ms          = excluded.timestamp_ms,
+    input_tokens          = excluded.input_tokens,
+    output_tokens         = excluded.output_tokens,
+    cache_read_tokens     = excluded.cache_read_tokens,
+    cache_creation_tokens = excluded.cache_creation_tokens,
+    model                 = excluded.model,
+    entrypoint            = excluded.entrypoint,
+    is_sidechain          = excluded.is_sidechain,
+    cwd                   = excluded.cwd,
+    cc_version            = excluded.cc_version,
+    profile_id            = COALESCE(usage_records.profile_id, excluded.profile_id)
 "#;
 
 const TOTALS_SQL: &str = r#"
@@ -119,7 +171,11 @@ impl Store {
     fn init(conn: Connection) -> Result<Self, CoreError> {
         conn.busy_timeout(Duration::from_secs(5))?;
         // WAL：读写分离，UI 读不被 ingest 写阻塞（T3 起会用到）
-        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;",
+        )?;
         let mut store = Store { conn };
         store.migrate()?;
         Ok(store)
@@ -137,20 +193,30 @@ impl Store {
         if version < 1 {
             let tx = self.conn.transaction()?;
             tx.execute_batch(SCHEMA_V1)?;
-            tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+            tx.execute_batch("PRAGMA user_version = 1;")?;
+            tx.commit()?;
+        }
+        if version < 2 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(SCHEMA_V2)?;
+            tx.execute_batch("PRAGMA user_version = 2;")?;
             tx.commit()?;
         }
         Ok(())
     }
 
-    /// 批量 UPSERT 用量记录。同 record_id 后到者胜（REPLACE），绝不累加。
+    /// 批量 UPSERT 用量记录。同 record_id 后到者胜，绝不累加。
     /// 每 [`UPSERT_BATCH`] 条一个事务，避免长事务锁库与崩溃丢整批。
+    /// 落库前按当前时间线物化归因（T2）：`profile_id` 为 NULL 即 Unknown。
     pub fn upsert_records(&mut self, records: &[UsageRecord]) -> Result<(), CoreError> {
+        // 时间线很小，每批加载一次内存查询即可；避免逐条 SQL 查询
+        let timeline = self.load_timeline()?;
         for chunk in records.chunks(UPSERT_BATCH) {
             let tx = self.conn.transaction()?;
             {
                 let mut stmt = tx.prepare_cached(UPSERT_SQL)?;
                 for r in chunk {
+                    let profile_id = attr::attribute_at(&timeline, r.timestamp_ms);
                     stmt.execute(params![
                         r.record_id,
                         r.session_id,
@@ -164,6 +230,7 @@ impl Store {
                         r.is_sidechain as i64,
                         r.cwd,
                         r.cc_version,
+                        profile_id,
                     ])?;
                 }
             }
@@ -203,6 +270,159 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // T2：订阅档案时间线 + 归因物化
+    // -----------------------------------------------------------------------
+
+    /// 所有档案，按 id 升序（T6 手动改名 UI 使用）
+    pub fn profiles(&self) -> Result<Vec<Profile>, CoreError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, endpoint, credential_fingerprint, display_name
+             FROM profiles ORDER BY id",
+        )?;
+        let profiles = stmt
+            .query_map([], |row| {
+                Ok(Profile {
+                    id: row.get(0)?,
+                    endpoint: row.get(1)?,
+                    credential_fingerprint: row.get(2)?,
+                    display_name: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(profiles)
+    }
+
+    /// 所有时间线区间，按 `start_ms` 升序
+    pub fn timeline_intervals(&self) -> Result<Vec<Interval>, CoreError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, profile_id, start_ms, end_ms
+             FROM profile_timeline ORDER BY start_ms, id",
+        )?;
+        let intervals = stmt
+            .query_map([], |row| {
+                Ok(Interval {
+                    id: Some(row.get(0)?),
+                    profile_id: row.get(1)?,
+                    start_ms: row.get(2)?,
+                    end_ms: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(intervals)
+    }
+
+    /// 从数据库重建内存时间线（契约决策在 attr 层，store 只负责持久化）
+    pub fn load_timeline(&self) -> Result<Timeline, CoreError> {
+        Ok(Timeline::new(self.profiles()?, self.timeline_intervals()?))
+    }
+
+    /// 应用一次 settings 快照并持久化时间线变化。
+    /// 纯决策逻辑在 [`attr::apply_snapshot`]；这里只落库 diff。
+    pub fn apply_settings_snapshot(
+        &mut self,
+        snapshot: &SettingsSnapshot,
+        at_ms: i64,
+    ) -> Result<ApplyOutcome, CoreError> {
+        let mut timeline = self.load_timeline()?;
+        let outcome = attr::apply_snapshot(&mut timeline, snapshot, at_ms);
+        if let ApplyOutcome::Changed {
+            created_profile,
+            closed_interval,
+            opened_interval,
+        } = &outcome
+        {
+            let tx = self.conn.transaction()?;
+            if let Some(profile) = created_profile {
+                tx.execute(
+                    "INSERT INTO profiles
+                         (id, endpoint, credential_fingerprint, display_name, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        profile.id,
+                        profile.endpoint,
+                        profile.credential_fingerprint,
+                        profile.display_name,
+                        at_ms
+                    ],
+                )?;
+            }
+            if let Some((id, end_ms)) = closed_interval
+                .as_ref()
+                .and_then(|iv| iv.id.map(|id| (id, iv.end_ms)))
+            {
+                tx.execute(
+                    "UPDATE profile_timeline SET end_ms = ?1 WHERE id = ?2",
+                    params![end_ms, id],
+                )?;
+            }
+            if let Some(interval) = opened_interval {
+                tx.execute(
+                    "INSERT INTO profile_timeline (profile_id, start_ms, end_ms)
+                     VALUES (?1, ?2, NULL)",
+                    params![interval.profile_id, interval.start_ms],
+                )?;
+            }
+            tx.commit()?;
+        }
+        Ok(outcome)
+    }
+
+    /// 归因查询：`ts_ms` 时刻属于哪个档案。
+    /// 内存实现：时间线很小，加载后复用 [`attr::attribute_at`]，
+    /// 保证写入物化与查询侧共用同一套宽限期语义。
+    pub fn attribute_at(&self, ts_ms: i64) -> Result<Option<ProfileId>, CoreError> {
+        Ok(attr::attribute_at(&self.load_timeline()?, ts_ms))
+    }
+
+    /// 手动修正（T6 接线）：把 `[start_ms, end_ms)` 内所有 usage 的归因
+    /// 改写为 `profile_id`（None = Unknown）。返回受影响行数。
+    /// 手动值在后续重扫时被 UPSERT 保留（见 `UPSERT_SQL`）。
+    pub fn reassign_profile_range(
+        &mut self,
+        profile_id: Option<ProfileId>,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<u64, CoreError> {
+        let affected = self.conn.execute(
+            "UPDATE usage_records SET profile_id = ?1
+             WHERE timestamp_ms >= ?2 AND timestamp_ms < ?3",
+            params![profile_id, start_ms, end_ms],
+        )?;
+        Ok(affected as u64)
+    }
+
+    /// 手动额度配置（R2-2，T5/T6 接线）：整体覆盖三列，`None` = 清除该项。
+    /// `quota_manual_used` 只存用户输入，不从统计累加；`quota_reset_date`
+    /// 为 ISO 日期字符串，仅用于倒计时展示，到期不自动清零。
+    /// 返回是否命中档案（false = `profile_id` 不存在）。
+    pub fn update_profile_quota(
+        &mut self,
+        profile_id: ProfileId,
+        total: Option<i64>,
+        used: Option<i64>,
+        reset_date: Option<&str>,
+    ) -> Result<bool, CoreError> {
+        let affected = self.conn.execute(
+            "UPDATE profiles
+             SET quota_manual_total = ?1, quota_manual_used = ?2, quota_reset_date = ?3
+             WHERE id = ?4",
+            params![total, used, reset_date, profile_id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// 每条用量记录的归因（record_id → profile_id），按时间排序；测试/诊断用。
+    pub fn record_profiles(&self) -> Result<Vec<(String, Option<ProfileId>)>, CoreError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT record_id, profile_id FROM usage_records ORDER BY timestamp_ms, record_id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// 统计 `[start_ms, end_ms)` 区间的四项 token 之和

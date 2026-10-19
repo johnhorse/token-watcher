@@ -157,9 +157,11 @@ Question 4 按体感调）。分钟级刷新（空闲 CPU≈0），悬浮窗内�
 
 ### 订阅档案识别规则（D23 + R2-3 修订）
 
-- **档案身份与凭据解耦（D23）**：档案有独立的持久 ID（首次出现时分配，此后
-  稳定不变）；端点（base URL）与凭据指纹是档案的映射属性——同一订阅换 key
-  不产生新档案，凭据轮换只更新映射
+- **档案身份与凭据（D23）**：档案有独立的持久 ID；身份判定 =
+  (endpoint, credential_fingerprint) 组合——首次见到新组合分配新档案，再次
+  见到同一组合复用同一档案。同 endpoint 不同指纹交替出现 = 两个档案（无法
+  区分「凭据轮换」与「同址双订阅」，宁可显示两个真实档案也不错误合并）；
+  精确语义以 docs/data-source/claude-settings-json.md 为准
 - 归属主判据 = 规范化的 `ANTHROPIC_BASE_URL`（scheme+host+port；path 差异
   提示不区分）
 - 次级键（可选，R2-3）= `ANTHROPIC_AUTH_TOKEN` **或** `ANTHROPIC_API_KEY`
