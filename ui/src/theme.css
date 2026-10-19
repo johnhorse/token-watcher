@@ -1,0 +1,134 @@
+/* T6 —— Meter Face 主题 tokens。暗色为设计基准，亮色跟随 prefers-color-scheme。 */
+:root {
+  color-scheme: dark light;
+  --bg: #262420;
+  --line: #3a3730;
+  --line-strong: #4a463d;
+  --text: #f2efe9;
+  --text-2: #8a857a;
+  --amber: #e8a33d;
+  --track: #3a3730;
+  --skeleton: #332f2a;
+  --font-ui: "Archivo", "PingFang SC", "Microsoft YaHei UI", -apple-system,
+    "Segoe UI", system-ui, sans-serif;
+  --font-num: "Fragment Mono", ui-monospace, "SF Mono", "Cascadia Mono",
+    "JetBrains Mono", Consolas, monospace;
+  --radius: 2px;
+  --dur-fast: 80ms;
+  --dur: 120ms;
+  --dur-slow: 240ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #f2efe9;
+    --line: #dfdacd;
+    --line-strong: #c9c3b2;
+    --text: #262420;
+    --text-2: #6e6a5f;
+    --track: #dfdacd;
+    --skeleton: #e7e2d6;
+  }
+}
+
+html,
+body {
+  height: 100%;
+}
+
+html {
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+#app {
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+#app::-webkit-scrollbar {
+  width: 6px;
+}
+
+#app::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+}
+
+#app::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 1px solid var(--amber);
+  outline-offset: 2px;
+}
+
+.section {
+  border-top: 1px solid var(--line);
+  padding: 12px 0;
+}
+
+.section h2 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.03em;
+  color: var(--text-2);
+}
+
+/* 45° 斜线纹理 = 估算语义；实心 = 实测/手动。v0.1 配额全为手动实心，该类为语义预留。 */
+.hatch {
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0 3px,
+    var(--text-2) 3px 4.5px
+  );
+}
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+  }
+}
