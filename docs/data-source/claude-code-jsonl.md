@@ -40,7 +40,13 @@ mode / permission-mode / file-history-snapshot / cost-state / …）。**只有
 | cc_version | `version` | Claude Code 版本（如 `2.1.303`），诊断用 |
 
 `message.usage` 里其余键（`output_tokens_details` / `cache_creation.ephemeral_*` /
-`service_tier` / `speed` …）v0.1 不采集。四项 usage 缺失或非数字 → 该行按坏行处理。
+`service_tier` / `speed` …）v0.1 不采集。
+
+四项判定（T1 实测定案，2026-10-19 修订）：**四项中至少一项存在且为非负整数
+→ 入库，缺失项按 0 补**；四项均缺失，或任一「存在」的字段非数字 / 为负 → 坏行。
+依据：真实数据中 team/subagent 占位记录（约 364 文件中 27 个、2675 条）只带
+input/output 无 cache 字段，属合法观测——若判坏行，D17 的「跳过 N 行」信号会被
+这些占位行主导，制造假警报。cache 缺失 = 无缓存计费，补 0 语义正确。
 
 ## 更新语义定案（D22）
 
