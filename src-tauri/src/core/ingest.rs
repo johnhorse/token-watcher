@@ -7,6 +7,10 @@
 //! - 截断/轮转检测：`size < checkpoint.byte_offset` 或 mtime 回退 → 从 0 重扫；
 //!   uuid UPSERT 幂等，重扫不会双计（D22）。
 //!
+//! T3 扩展（保持原 API 不变，测试无感）：
+//! - [`scan_dir_with_progress`]：首扫进度回调（done/total），供 scan-progress 事件；
+//! - [`ingest_file_with_records`]：返回本次解析出的记录，供 usage-pulse 事件。
+//!
 //! 顺序保证：先提交记录、后写 checkpoint。若两步之间崩溃，下次从旧 offset 重读，
 //! 走 UPSERT 后到者胜，结果仍正确；反过来则会丢记录。
 
@@ -15,7 +19,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use super::parse::{parse_line, ParsedLine};
+use super::parse::{parse_line, ParsedLine, UsageRecord};
 use super::store::{Checkpoint, Store};
 use super::CoreError;
 
@@ -53,6 +57,18 @@ pub fn checkpoint_key(path: &Path) -> String {
 
 /// 增量读取单个文件并落库
 pub fn ingest_file(store: &mut Store, path: &Path) -> Result<FileIngestStats, CoreError> {
+    Ok(ingest_file_with_records(store, path)?.0)
+}
+
+/// 同 [`ingest_file`]，但把本次解析出的记录一并返回（T3：usage-pulse 用）。
+///
+/// 「新记录」= 本次从 checkpoint 之后读到的 Record 行，不区分 UPSERT 是否真的
+/// 插入（uuid 重复时不会新增行）。重复导入/截断重扫会重复回报这些行，
+/// UI 侧脉冲累计按幂等处理（契约允许）。
+pub fn ingest_file_with_records(
+    store: &mut Store,
+    path: &Path,
+) -> Result<(FileIngestStats, Vec<UsageRecord>), CoreError> {
     let metadata = fs::metadata(path)?;
     let size = metadata.len().min(i64::MAX as u64) as i64;
     let mtime_ms = metadata
@@ -122,7 +138,7 @@ pub fn ingest_file(store: &mut Store, path: &Path) -> Result<FileIngestStats, Co
             size: size.max(new_offset),
         },
     )?;
-    Ok(stats)
+    Ok((stats, records))
 }
 
 /// 递归扫描目录下所有 `*.jsonl` 并增量落库。
@@ -130,6 +146,19 @@ pub fn ingest_file(store: &mut Store, path: &Path) -> Result<FileIngestStats, Co
 /// 根目录不存在按空态容忍；根目录不可读直接报错（D17 的第一档）。
 /// 单个文件失败跳过计数，不中断整轮扫描；DB 故障则上抛。
 pub fn scan_dir(store: &mut Store, root: &Path) -> Result<ScanStats, CoreError> {
+    scan_dir_with_progress(store, root, |_, _| {})
+}
+
+/// 同 [`scan_dir`]，并在枚举完成后回调 `(0, files_total)`、每处理完一个文件
+/// 回调 `(files_done, files_total)`（T3：scan-progress 事件）。
+pub fn scan_dir_with_progress<F>(
+    store: &mut Store,
+    root: &Path,
+    mut progress: F,
+) -> Result<ScanStats, CoreError>
+where
+    F: FnMut(u64, u64),
+{
     let mut stats = ScanStats::default();
     if !root.exists() {
         return Ok(stats);
@@ -150,7 +179,9 @@ pub fn scan_dir(store: &mut Store, root: &Path) -> Result<ScanStats, CoreError> 
     // 排序保证跨次运行/跨平台的导入顺序稳定（同 uuid 跨文件时后到者胜）
     files.sort();
 
-    for path in files {
+    let total = files.len() as u64;
+    progress(0, total);
+    for (index, path) in files.into_iter().enumerate() {
         stats.files_scanned += 1;
         match ingest_file(store, &path) {
             Ok(file_stats) => {
@@ -163,6 +194,7 @@ pub fn scan_dir(store: &mut Store, root: &Path) -> Result<ScanStats, CoreError> 
             Err(e @ CoreError::Db(_)) => return Err(e),
             Err(_) => stats.files_failed += 1,
         }
+        progress(index as u64 + 1, total);
     }
     Ok(stats)
 }
