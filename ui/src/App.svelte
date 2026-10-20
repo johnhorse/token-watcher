@@ -151,6 +151,19 @@
       if (dirtyTimer) clearTimeout(dirtyTimer);
     };
   });
+
+  async function handleUpdateProfile(
+    profileId: number,
+    displayName: string,
+    quota: {
+      total: number | null;
+      used: number | null;
+      reset_date: string | null;
+    },
+  ) {
+    await adapter.updateProfileDisplay(profileId, displayName);
+    await adapter.updateProfileQuota(profileId, quota);
+  }
 </script>
 
 <div class="app">
@@ -190,7 +203,10 @@
     <RangeChips value={range} onchange={setRange} />
     <Chart {pulses} />
     <ModelsBar models={dashboard.models} />
-    <ProfileCards profiles={dashboard.profiles} />
+    <ProfileCards
+      profiles={dashboard.profiles}
+      onUpdateProfile={handleUpdateProfile}
+    />
     <SessionList sessions={dashboard.sessions} />
   {:else}
     <ScanProgress status={scan} />

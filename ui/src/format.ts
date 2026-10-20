@@ -16,3 +16,21 @@ export function formatCompact(value: number): string {
 export function formatPercent(value: number): string {
   return `${Math.round(value * 10) / 10}`.replace(/\.0$/, "");
 }
+
+export function parseTokenInput(input: string): {
+  value: number | null;
+  error?: string;
+} {
+  const trimmed = input.trim().replace(/[,_\s]/g, "");
+  if (!trimmed) return { value: null };
+  const match = trimmed.match(/^(\d+(?:\.\d+)?)([kKmMbB])?$/);
+  if (!match) return { value: null, error: "invalid" };
+  const num = parseFloat(match[1]);
+  if (isNaN(num) || num < 0) return { value: null, error: "invalid" };
+  const unit = match[2]?.toUpperCase();
+  let multiplier = 1;
+  if (unit === "K") multiplier = 1_000;
+  else if (unit === "M") multiplier = 1_000_000;
+  else if (unit === "B") multiplier = 1_000_000_000;
+  return { value: Math.round(num * multiplier) };
+}

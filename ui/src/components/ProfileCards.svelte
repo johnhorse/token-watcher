@@ -1,10 +1,79 @@
 <script lang="ts">
-  // T6 —— 订阅档案卡：推断标签恒显示；配额条纯手动语义；Unknown 卡置灰、无配额条。
-  import { formatCompact, formatPercent } from "../format";
+  // T6 —— 订阅档案卡：推断标签恒显示；配额条纯手动语义；Unknown 卡置灰、无配额条；卡片内展开编辑。
+  import {
+    formatCompact,
+    formatExact,
+    formatPercent,
+    parseTokenInput,
+  } from "../format";
   import { t } from "../i18n";
   import type { ProfileCard } from "../data";
 
-  let { profiles }: { profiles: ProfileCard[] } = $props();
+  let {
+    profiles,
+    onUpdateProfile,
+  }: {
+    profiles: ProfileCard[];
+    onUpdateProfile?: (
+      profileId: number,
+      displayName: string,
+      quota: {
+        total: number | null;
+        used: number | null;
+        reset_date: string | null;
+      },
+    ) => Promise<void>;
+  } = $props();
+
+  let editingId = $state<number | null>(null);
+  let editName = $state("");
+  let editTotalStr = $state("");
+  let editUsedStr = $state("");
+  let editResetDate = $state("");
+  let saving = $state(false);
+  let saveError = $state<string | null>(null);
+
+  let parsedTotal = $derived(parseTokenInput(editTotalStr));
+  let parsedUsed = $derived(parseTokenInput(editUsedStr));
+  let canSave = $derived(
+    editName.trim().length > 0 && !parsedTotal.error && !parsedUsed.error,
+  );
+
+  function startEdit(profile: ProfileCard) {
+    if (profile.profile_id === null) return;
+    editingId = profile.profile_id;
+    editName = profile.display_name;
+    editTotalStr =
+      profile.quota?.total != null ? String(profile.quota.total) : "";
+    editUsedStr = profile.quota?.used != null ? String(profile.quota.used) : "";
+    editResetDate = profile.quota?.reset_date
+      ? profile.quota.reset_date.slice(0, 10)
+      : "";
+    saveError = null;
+  }
+
+  function cancelEdit() {
+    editingId = null;
+    saveError = null;
+  }
+
+  async function handleSave(profileId: number) {
+    if (!canSave || saving || !onUpdateProfile) return;
+    saving = true;
+    saveError = null;
+    try {
+      await onUpdateProfile(profileId, editName.trim(), {
+        total: parsedTotal.value,
+        used: parsedUsed.value,
+        reset_date: editResetDate || null,
+      });
+      editingId = null;
+    } catch (err) {
+      saveError = err instanceof Error ? err.message : String(err);
+    } finally {
+      saving = false;
+    }
+  }
 
   type ResetInfo = {
     key: "profiles.reset" | "profiles.resetToday" | "profiles.resetPast";
@@ -53,7 +122,23 @@
       <li class="card" class:unknown>
         <div class="head">
           <span class="name" title={name}>{name}</span>
-          <span class="tokens">{formatCompact(profile.tokens.total)}</span>
+          <div class="head-right">
+            <span class="tokens">{formatCompact(profile.tokens.total)}</span>
+            {#if !unknown}
+              <button
+                type="button"
+                class="edit-btn"
+                onclick={() =>
+                  editingId === profile.profile_id
+                    ? cancelEdit()
+                    : startEdit(profile)}
+              >
+                {editingId === profile.profile_id
+                  ? t("profiles.cancel")
+                  : t("profiles.edit")}
+              </button>
+            {/if}
+          </div>
         </div>
         <div class="meta">
           <span class="endpoint" title={profile.endpoint ?? undefined}
@@ -68,7 +153,103 @@
             {/if}
           </span>
         </div>
-        {#if !unknown && pct !== null}
+        {#if editingId === profile.profile_id}
+          <form
+            class="edit-form"
+            onsubmit={(e) => {
+              e.preventDefault();
+              void handleSave(profile.profile_id!);
+            }}
+          >
+            <div class="field">
+              <label for="name-{profile.profile_id}"
+                >{t("profiles.nameLabel")}</label
+              >
+              <input
+                id="name-{profile.profile_id}"
+                type="text"
+                bind:value={editName}
+                required
+              />
+            </div>
+            <div class="grid-2">
+              <div class="field">
+                <div class="label-row">
+                  <label for="total-{profile.profile_id}"
+                    >{t("profiles.totalLabel")}</label
+                  >
+                  {#if parsedTotal.value !== null}
+                    <span class="preview"
+                      >{formatExact(parsedTotal.value)}</span
+                    >
+                  {:else if parsedTotal.error}
+                    <span class="preview error"
+                      >{t("profiles.invalidNumber")}</span
+                    >
+                  {:else}
+                    <span class="preview hint">{t("profiles.noLimit")}</span>
+                  {/if}
+                </div>
+                <input
+                  id="total-{profile.profile_id}"
+                  type="text"
+                  bind:value={editTotalStr}
+                  placeholder={t("profiles.tokenHint")}
+                />
+              </div>
+              <div class="field">
+                <div class="label-row">
+                  <label for="used-{profile.profile_id}"
+                    >{t("profiles.usedLabel")}</label
+                  >
+                  {#if parsedUsed.value !== null}
+                    <span class="preview">{formatExact(parsedUsed.value)}</span>
+                  {:else if parsedUsed.error}
+                    <span class="preview error"
+                      >{t("profiles.invalidNumber")}</span
+                    >
+                  {/if}
+                </div>
+                <input
+                  id="used-{profile.profile_id}"
+                  type="text"
+                  bind:value={editUsedStr}
+                  placeholder={t("profiles.tokenHint")}
+                />
+              </div>
+            </div>
+            <div class="field">
+              <label for="reset-{profile.profile_id}"
+                >{t("profiles.resetLabel")}</label
+              >
+              <input
+                id="reset-{profile.profile_id}"
+                type="date"
+                bind:value={editResetDate}
+              />
+            </div>
+            {#if saveError}
+              <div class="error-msg">{saveError}</div>
+            {/if}
+            <div class="actions">
+              <button
+                type="button"
+                class="btn secondary"
+                onclick={cancelEdit}
+                disabled={saving}
+              >
+                {t("profiles.cancel")}
+              </button>
+              <button
+                type="submit"
+                class="btn primary"
+                disabled={saving || !canSave}
+              >
+                {saving ? t("profiles.saving") : t("profiles.save")}
+              </button>
+            </div>
+          </form>
+        {:else if !unknown && pct !== null}
           <div class="bar">
             <span style:width={`${pct}%`}></span>
           </div>
@@ -181,5 +362,121 @@
     font-size: 9.5px;
     color: var(--text-2);
     font-variant-numeric: tabular-nums;
+  }
+  .head-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .edit-btn {
+    background: transparent;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    color: var(--text-2);
+    font-size: 9px;
+    font-family: var(--font-ui);
+    padding: 1px 5px;
+    cursor: pointer;
+    line-height: 1.3;
+  }
+  .edit-btn:hover {
+    color: var(--text);
+    border-color: var(--text-2);
+  }
+  .edit-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--line);
+  }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .label-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 4px;
+  }
+  label {
+    font-size: 10px;
+    color: var(--text-2);
+  }
+  .preview {
+    font-family: var(--font-num);
+    font-size: 9.5px;
+    color: var(--amber);
+  }
+  .preview.error {
+    color: #e06c75;
+  }
+  .preview.hint {
+    color: var(--text-2);
+  }
+  input[type="text"],
+  input[type="date"] {
+    background: var(--bg);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--font-num);
+    font-size: 11px;
+    padding: 4px 6px;
+    box-sizing: border-box;
+    width: 100%;
+  }
+  input[type="text"]:focus,
+  input[type="date"]:focus {
+    outline: 1px solid var(--amber);
+    border-color: var(--amber);
+  }
+  .error-msg {
+    color: #e06c75;
+    font-size: 10px;
+  }
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .btn {
+    font-family: var(--font-ui);
+    font-size: 10.5px;
+    padding: 3px 10px;
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+  .btn.secondary {
+    background: transparent;
+    color: var(--text-2);
+    border: 1px solid var(--line-strong);
+  }
+  .btn.secondary:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--text-2);
+  }
+  .btn.primary {
+    background: var(--amber);
+    color: #1a1815;
+    font-weight: 500;
+    border: 1px solid var(--amber);
+  }
+  .btn.primary:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>
