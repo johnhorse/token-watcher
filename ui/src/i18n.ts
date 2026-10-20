@@ -102,6 +102,19 @@ const zh = {
   "theme.slate": "Slate",
   "theme.mint": "Mint",
   "theme.toggleTooltip": "切换主题（当前：{theme}）",
+  "flight.back": "‹ 返回看板",
+  "flight.title": "会话飞行记录",
+  "flight.live": "LIVE",
+  "flight.requests": "{n} 次请求",
+  "flight.duration": "时长 {d}",
+  "flight.cacheHitRatio": "输入缓存命中率 {pct}%",
+  "flight.pulseStrip": "逐次吞吐脉冲谱带",
+  "flight.eventStream": "请求事件流",
+  "flight.sidechain": "子链",
+  "flight.modelSwitch": "模型切换: {m}",
+  "flight.spike": "突刺: {r}",
+  "flight.notFound": "未找到会话数据",
+  "flight.truncated": "已显示最新 {n} 条请求",
 } as const;
 
 export type MessageKey = keyof typeof zh;
@@ -206,6 +219,19 @@ const en: Record<MessageKey, string> = {
   "theme.slate": "Slate",
   "theme.mint": "Mint",
   "theme.toggleTooltip": "Switch theme (current: {theme})",
+  "flight.back": "‹ Dashboard",
+  "flight.title": "Flight Recorder",
+  "flight.live": "LIVE",
+  "flight.requests": "{n} requests",
+  "flight.duration": "Duration {d}",
+  "flight.cacheHitRatio": "Input cache hit {pct}%",
+  "flight.pulseStrip": "Request Pulse Strip",
+  "flight.eventStream": "Request Event Stream",
+  "flight.sidechain": "Sidechain",
+  "flight.modelSwitch": "Model switch: {m}",
+  "flight.spike": "Spike: {r}",
+  "flight.notFound": "Session data not found",
+  "flight.truncated": "Showing latest {n} requests",
 };
 
 const dict: Record<Lang, Record<MessageKey, string>> = { zh, en };

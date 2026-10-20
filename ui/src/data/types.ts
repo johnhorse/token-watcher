@@ -61,6 +61,70 @@ export interface SessionRow {
   active: boolean;
 }
 
+export interface PulsePoint {
+  index: number;
+  timestamp_ms: number;
+  total_tokens: number;
+  cache_read_tokens: number;
+  is_sidechain: boolean;
+  is_spike: boolean;
+}
+
+export interface FlightRecordEvent {
+  request_index: number;
+  record_id: string;
+  timestamp_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  total_tokens: number;
+  model: string;
+  entrypoint: string;
+  is_sidechain: boolean;
+  profile_id: number | null;
+  attribution_source: string;
+  cost: TokenCost;
+  model_switched: boolean;
+  profile_switched: boolean;
+  is_spike: boolean;
+  spike_reason: string | null;
+}
+
+export interface SessionModelSlice {
+  model: string;
+  tokens: TokenTotals;
+  cost: TokenCost;
+  share: number;
+}
+
+export interface SessionProfileSlice {
+  profile_id: number | null;
+  display_name: string;
+  tokens: TokenTotals;
+  cost: TokenCost;
+}
+
+export interface SessionFlightRecorder {
+  session_id: string;
+  title: string;
+  cwd: string | null;
+  cc_version: string | null;
+  start_time_ms: number;
+  end_time_ms: number;
+  duration_seconds: number;
+  is_active: boolean;
+  total_requests: number;
+  totals: TokenTotals;
+  cost: TokenCost;
+  cache_hit_ratio: number;
+  models_used: SessionModelSlice[];
+  profiles_used: SessionProfileSlice[];
+  pulse_strip: PulsePoint[];
+  events: FlightRecordEvent[];
+  events_truncated: boolean;
+}
+
 export interface Dashboard {
   range: Range;
   totals: TokenTotals;
@@ -142,6 +206,8 @@ export interface UiAdapter {
   getTheme(): Promise<string>;
   setTheme(theme: string): Promise<void>;
   onThemeChanged(cb: (theme: string) => void): Unsubscribe;
+  getSessionFlightRecorder(sessionId: string, limit?: number): Promise<SessionFlightRecorder | null>;
+  onSessionFlightUpdated?: (cb: (payload: { session_id: string }) => void) => Unsubscribe;
 
   onPulse(cb: (pulse: UsagePulse) => void): Unsubscribe;
   onScanProgress(cb: (status: ScanStatus) => void): Unsubscribe;

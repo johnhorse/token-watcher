@@ -4,7 +4,13 @@
   import { t } from "../i18n";
   import type { SessionRow } from "../data";
 
-  let { sessions }: { sessions: SessionRow[] } = $props();
+  let {
+    sessions,
+    onSelect,
+  }: {
+    sessions: SessionRow[];
+    onSelect?: (sessionId: string) => void;
+  } = $props();
 </script>
 
 <section class="section">
@@ -12,12 +18,20 @@
   <ul>
     {#each sessions as session (session.session_id)}
       <li>
-        <span class="dot" class:on={session.active} aria-hidden="true"></span>
-        <span class="title" title={session.title}>{session.title}</span>
-        {#if session.active}
-          <span class="sr">{t("sessions.active")}</span>
-        {/if}
-        <span class="total">{formatCompact(session.total)}</span>
+        <button
+          type="button"
+          class="session-btn"
+          onclick={() => onSelect?.(session.session_id)}
+          title="{session.title} · {t('flight.title')}"
+        >
+          <span class="dot" class:on={session.active} aria-hidden="true"></span>
+          <span class="title">{session.title}</span>
+          {#if session.active}
+            <span class="sr">{t("sessions.active")}</span>
+          {/if}
+          <span class="total">{formatCompact(session.total)}</span>
+          <span class="chevron" aria-hidden="true">›</span>
+        </button>
       </li>
     {/each}
   </ul>
@@ -30,10 +44,29 @@
     padding: 0;
   }
   li {
+    margin: 2px 0;
+  }
+  .session-btn {
     display: flex;
     align-items: center;
     gap: 7px;
-    padding: 5px 0;
+    width: 100%;
+    padding: 5px 6px;
+    margin: 0 -6px;
+    border: none;
+    background: transparent;
+    border-radius: 4px;
+    text-align: left;
+    cursor: pointer;
+    color: inherit;
+    font: inherit;
+    transition: background 120ms ease;
+  }
+  .session-btn:hover {
+    background: var(--bg-1);
+  }
+  .session-btn:focus-visible {
+    outline: 1px solid var(--accent);
   }
   .dot {
     width: 4px;
@@ -58,5 +91,16 @@
     font-size: 11px;
     color: var(--text-2);
     font-variant-numeric: tabular-nums;
+  }
+  .chevron {
+    font-family: var(--font-num);
+    font-size: 13px;
+    color: var(--text-2);
+    opacity: 0.5;
+    padding-left: 2px;
+  }
+  .session-btn:hover .chevron {
+    opacity: 1;
+    color: var(--accent);
   }
 </style>

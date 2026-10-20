@@ -64,6 +64,29 @@ pub fn get_dashboard(state: State<'_, AppState>, range: String) -> Result<Dashbo
     let price_guard = price_table.read().unwrap();
     agg::dashboard_with_prices(store, range, Some(&price_guard)).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub fn get_session_flight_recorder(
+    state: State<'_, AppState>,
+    session_id: String,
+    limit: Option<usize>,
+) -> Result<Option<agg::SessionFlightRecorder>, String> {
+    let snap = state.status.lock().map_err(|e| e.to_string())?.clone();
+    if snap.phase != "done" && snap.phase != "empty" {
+        return Ok(None);
+    }
+    let mut guard = state.store.lock().map_err(|e| e.to_string())?;
+    if guard.is_none() {
+        let store = Store::open_readonly(&state.db_path).map_err(|e| e.to_string())?;
+        *guard = Some(store);
+    }
+    let store = guard.as_ref().expect("上面刚放入");
+    let price_table = state.pricing.table();
+    let price_guard = price_table.read().unwrap();
+    let now = agg::now_ms();
+    agg::session_flight_recorder(store, Some(&price_guard), &session_id, limit, now)
+        .map_err(|e| e.to_string())
+}
 #[tauri::command]
 pub fn get_scan_status(state: State<'_, AppState>) -> ScanStatusResponse {
     let snap = state.status.lock().map(|s| s.clone()).unwrap_or_default();

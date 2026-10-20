@@ -204,6 +204,7 @@ fn progress_json(phase: &str, done: u64, total: u64) -> Value {
 fn pulse_json(record: &crate::core::parse::UsageRecord) -> Value {
     json!({
         "t_ms": record.timestamp_ms,
+        "session_id": record.session_id,
         "input": record.input_tokens,
         "output": record.output_tokens,
         "cache_read": record.cache_read_tokens,
@@ -561,6 +562,7 @@ impl<S: EventSink> DataEngine<S> {
                 return;
             };
             let mut pulses = Vec::new();
+            let mut touched_sessions = std::collections::HashSet::new();
             let mut parsed_records = 0u64;
             let mut skipped = 0u64;
             let mut db_error = None;
@@ -569,6 +571,7 @@ impl<S: EventSink> DataEngine<S> {
                     Ok((stats, records)) => {
                         parsed_records += stats.records;
                         for record in &records {
+                            touched_sessions.insert(record.session_id.clone());
                             pulses.push(pulse_json(record));
                         }
                     }
@@ -601,6 +604,9 @@ impl<S: EventSink> DataEngine<S> {
             // UI 幂等累计可接受——契约的到达脉冲语义）
             for pulse in pulses {
                 self.push_event("usage-pulse", pulse);
+            }
+            for sid in touched_sessions {
+                self.push_event("session-flight-updated", json!({ "session_id": sid }));
             }
             if changed {
                 self.emit_dirty();

@@ -16,6 +16,7 @@ import type {
   UiAdapter,
   UsagePulse,
   ProxyStatus,
+  SessionFlightRecorder,
 } from "./types";
 
 const params = new URLSearchParams(window.location.search);
@@ -314,6 +315,180 @@ function buildDashboard(range: Range): Dashboard {
   };
 }
 
+function buildMockFlightRecorder(sessionId: string, limit?: number): SessionFlightRecorder {
+  const now = Date.now();
+  const startTime = now - 3600 * 1000 * 1.5;
+  const totalTurns = 28;
+  const turns = [];
+  const pulseStrip = [];
+
+  let inputSum = 0;
+  let outputSum = 0;
+  let cacheReadSum = 0;
+  let cacheCreationSum = 0;
+  let costSum = 0;
+
+  const models = ["claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022"];
+  let prevMainModel: string | null = null;
+
+  for (let i = 1; i <= totalTurns; i++) {
+    const isSidechain = i === 8 || i === 9;
+    const model = isSidechain ? models[1] : (i > 20 ? models[1] : models[0]);
+    const tMs = startTime + (i * 180 * 1000);
+
+    const isSpike1 = i === 14;
+    const isSpike2 = i === 4;
+    const isSpike = isSpike1 || isSpike2;
+
+    const input = isSpike1 ? 38500 : (isSidechain ? 400 : Math.round(800 + (i * 37) % 600));
+    const output = Math.round(300 + (i * 41) % 500);
+    const cacheCreation = isSpike2 ? 24000 : 0;
+    const cacheRead = isSpike1 ? 6000 : Math.round(3500 + (i * 53) % 2000);
+    const total = input + output + cacheRead + cacheCreation;
+
+    let spikeReason: string | null = null;
+    if (isSpike1) spikeReason = "未缓存输入主导";
+    else if (isSpike2) spikeReason = "缓存写入/上下文填充";
+
+    const modelSwitched = !isSidechain && prevMainModel !== null && prevMainModel !== model;
+    if (!isSidechain) prevMainModel = model;
+
+    inputSum += input;
+    outputSum += output;
+    cacheReadSum += cacheRead;
+    cacheCreationSum += cacheCreation;
+
+    const turnCost = model.includes("sonnet")
+      ? (input * 0.000003 + output * 0.000015 + cacheRead * 0.0000003 + cacheCreation * 0.00000375)
+      : (input * 0.0000008 + output * 0.000004 + cacheRead * 0.00000008);
+    costSum += turnCost;
+
+    pulseStrip.push({
+      index: i,
+      timestamp_ms: tMs,
+      total_tokens: total,
+      cache_read_tokens: cacheRead,
+      is_sidechain: isSidechain,
+      is_spike: isSpike,
+    });
+
+    turns.push({
+      request_index: i,
+      record_id: `rec-${sessionId}-${i}`,
+      timestamp_ms: tMs,
+      input_tokens: input,
+      output_tokens: output,
+      cache_read_tokens: cacheRead,
+      cache_creation_tokens: cacheCreation,
+      total_tokens: total,
+      model,
+      entrypoint: "cli",
+      is_sidechain: isSidechain,
+      profile_id: 1,
+      attribution_source: "proxy",
+      cost: {
+        total: Math.round(turnCost * 1000) / 1000,
+        coverage: 1.0,
+        is_complete: true,
+        unpriced_tokens: 0,
+      },
+      model_switched: modelSwitched,
+      profile_switched: false,
+      is_spike: isSpike,
+      spike_reason: spikeReason,
+    });
+  }
+
+  const totalTokens = inputSum + outputSum + cacheReadSum + cacheCreationSum;
+  const maxEvents = limit ?? 200;
+  const eventsTruncated = turns.length > maxEvents;
+  const events = eventsTruncated ? turns.slice(-maxEvents) : turns;
+
+  return {
+    session_id: sessionId,
+    title: sessionId.replace("mock-session-", "project-"),
+    cwd: "/Volumes/Data/projects/token-watcher",
+    cc_version: "1.0.8",
+    start_time_ms: startTime,
+    end_time_ms: now - 30_000,
+    duration_seconds: Math.round((now - 30_000 - startTime) / 1000),
+    is_active: sessionId === "mock-session-1",
+    total_requests: totalTurns,
+    totals: {
+      input: inputSum,
+      output: outputSum,
+      cache_read: cacheReadSum,
+      cache_creation: cacheCreationSum,
+      total: totalTokens,
+    },
+    cost: {
+      total: Math.round(costSum * 100) / 100,
+      coverage: 1.0,
+      is_complete: true,
+      unpriced_tokens: 0,
+    },
+    cache_hit_ratio: (inputSum + cacheReadSum) > 0 ? cacheReadSum / (inputSum + cacheReadSum) : 0,
+    models_used: [
+      {
+        model: "claude-3-7-sonnet-20250219",
+        tokens: {
+          input: Math.round(inputSum * 0.75),
+          output: Math.round(outputSum * 0.75),
+          cache_read: Math.round(cacheReadSum * 0.75),
+          cache_creation: cacheCreationSum,
+          total: Math.round(totalTokens * 0.78),
+        },
+        cost: {
+          total: Math.round(costSum * 0.85 * 100) / 100,
+          coverage: 1.0,
+          is_complete: true,
+          unpriced_tokens: 0,
+        },
+        share: 0.78,
+      },
+      {
+        model: "claude-3-5-haiku-20241022",
+        tokens: {
+          input: Math.round(inputSum * 0.25),
+          output: Math.round(outputSum * 0.25),
+          cache_read: Math.round(cacheReadSum * 0.25),
+          cache_creation: 0,
+          total: Math.round(totalTokens * 0.22),
+        },
+        cost: {
+          total: Math.round(costSum * 0.15 * 100) / 100,
+          coverage: 1.0,
+          is_complete: true,
+          unpriced_tokens: 0,
+        },
+        share: 0.22,
+      },
+    ],
+    profiles_used: [
+      {
+        profile_id: 1,
+        display_name: "Anthropic Direct (proxy)",
+        tokens: {
+          input: inputSum,
+          output: outputSum,
+          cache_read: cacheReadSum,
+          cache_creation: cacheCreationSum,
+          total: totalTokens,
+        },
+        cost: {
+          total: Math.round(costSum * 100) / 100,
+          coverage: 1.0,
+          is_complete: true,
+          unpriced_tokens: 0,
+        },
+      },
+    ],
+    pulse_strip: pulseStrip,
+    events,
+    events_truncated: eventsTruncated,
+  };
+}
+
 function emitPulse(): void {
   const total = 8_000 + Math.floor(Math.random() * 52_000);
   const pulse = splitPulse(total, Date.now());
@@ -500,6 +675,12 @@ export function createMockAdapter(): UiAdapter {
     onThemeChanged(cb) {
       themeSubs.add(cb);
       return () => themeSubs.delete(cb);
+    },
+    async getSessionFlightRecorder(sessionId: string, limit?: number) {
+      return buildMockFlightRecorder(sessionId, limit);
+    },
+    onSessionFlightUpdated() {
+      return () => {};
     },
 
     onPulse(cb) {

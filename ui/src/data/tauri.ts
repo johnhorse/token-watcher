@@ -14,6 +14,7 @@ import type {
   ProxyStatus,
   HudSummary,
   Quota,
+  SessionFlightRecorder,
 } from "./types";
 
 function subscribe<T>(event: string, cb: (payload: T) => void): Unsubscribe {
@@ -74,6 +75,12 @@ export function createTauriAdapter(): UiAdapter {
     getTheme: () => invoke<string>("get_theme"),
     setTheme: (theme: string) => invoke<void>("set_theme", { theme }),
     onThemeChanged: (cb) => subscribe<string>("theme-changed", cb),
+    getSessionFlightRecorder: (sessionId: string, limit?: number) =>
+      invoke<SessionFlightRecorder | null>("get_session_flight_recorder", {
+        sessionId,
+        limit: limit ?? null,
+      }),
+    onSessionFlightUpdated: (cb) => subscribe<{ session_id: string }>("session-flight-updated", cb),
 
 
     onPulse: (cb) => subscribe<UsagePulse>("usage-pulse", cb),

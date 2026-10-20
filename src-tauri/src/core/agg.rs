@@ -51,7 +51,7 @@ pub enum TrayMetric {
 }
 
 /// 四项 token + 总和（契约 `totals` / `ProfileCard.tokens` 形状）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TokenTotals {
     pub input: i64,
     pub output: i64,
@@ -146,6 +146,78 @@ pub struct HudSummary {
     pub rate_per_min: i64,
     /// 鼠标穿透锁定状态
     pub hud_locked: bool,
+}
+
+/// 脉冲谱带点（轻量，用于顶部谱带渲染）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PulsePoint {
+    pub index: usize,
+    pub timestamp_ms: i64,
+    pub total_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub is_sidechain: bool,
+    pub is_spike: bool,
+}
+
+/// 单次请求事件明细
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlightRecordEvent {
+    pub request_index: usize,
+    pub record_id: String,
+    pub timestamp_ms: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub total_tokens: i64,
+    pub model: String,
+    pub entrypoint: String,
+    pub is_sidechain: bool,
+    pub profile_id: Option<i64>,
+    pub attribution_source: String,
+    pub cost: TokenCost,
+    pub model_switched: bool,
+    pub profile_switched: bool,
+    pub is_spike: bool,
+    pub spike_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionModelSlice {
+    pub model: String,
+    pub tokens: TokenTotals,
+    pub cost: TokenCost,
+    pub share: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionProfileSlice {
+    pub profile_id: Option<i64>,
+    pub display_name: String,
+    pub tokens: TokenTotals,
+    pub cost: TokenCost,
+}
+
+/// 会话飞行记录仪完整视图响应
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionFlightRecorder {
+    pub session_id: String,
+    pub title: String,
+    pub cwd: Option<String>,
+    pub cc_version: Option<String>,
+    pub start_time_ms: i64,
+    pub end_time_ms: i64,
+    pub duration_seconds: i64,
+    pub is_active: bool,
+    pub total_requests: usize,
+    pub totals: TokenTotals,
+    pub cost: TokenCost,
+    pub cache_hit_ratio: f64,
+    pub models_used: Vec<SessionModelSlice>,
+    pub profiles_used: Vec<SessionProfileSlice>,
+    pub pulse_strip: Vec<PulsePoint>,
+    pub events: Vec<FlightRecordEvent>,
+    pub events_truncated: bool,
 }
 
 /// 当前 Unix epoch 毫秒
@@ -635,4 +707,346 @@ fn session_title(session_id: &str, cwd: Option<&str>) -> String {
     } else {
         tail.to_string()
     }
+}
+
+/// 查询单个会话的完整飞行记录（Flight Recorder）
+pub fn session_flight_recorder(
+    store: &Store,
+    prices: Option<&PriceTable>,
+    session_id: &str,
+    limit: Option<usize>,
+    now_ms: i64,
+) -> Result<Option<SessionFlightRecorder>, CoreError> {
+    let default_table;
+    let prices = match prices {
+        Some(p) => p,
+        None => {
+            default_table = PriceTable::bundled();
+            &default_table
+        }
+    };
+
+    struct RawFlightRow {
+        record_id: String,
+        timestamp_ms: i64,
+        input_tokens: i64,
+        output_tokens: i64,
+        cache_read_tokens: i64,
+        cache_creation_tokens: i64,
+        model: String,
+        entrypoint: String,
+        is_sidechain: bool,
+        cwd: Option<String>,
+        cc_version: Option<String>,
+        profile_id: Option<i64>,
+        display_name: Option<String>,
+        attribution_source: String,
+    }
+
+    let mut stmt = store.conn().prepare_cached(
+        "SELECT r.record_id, r.timestamp_ms, r.input_tokens, r.output_tokens,
+                r.cache_read_tokens, r.cache_creation_tokens,
+                r.model, r.entrypoint, r.is_sidechain, r.cwd, r.cc_version,
+                r.profile_id, p.display_name, r.attribution_source
+         FROM usage_records r
+         LEFT JOIN profiles p ON r.profile_id = p.id
+         WHERE r.session_id = ?1
+         ORDER BY r.timestamp_ms ASC, r.record_id ASC",
+    )?;
+
+    let rows = stmt
+        .query_map(params![session_id], |row| {
+            Ok(RawFlightRow {
+                record_id: row.get(0)?,
+                timestamp_ms: row.get(1)?,
+                input_tokens: row.get(2)?,
+                output_tokens: row.get(3)?,
+                cache_read_tokens: row.get(4)?,
+                cache_creation_tokens: row.get(5)?,
+                model: row.get(6)?,
+                entrypoint: row.get(7)?,
+                is_sidechain: row.get::<_, i64>(8)? != 0,
+                cwd: row.get(9)?,
+                cc_version: row.get(10)?,
+                profile_id: row.get(11)?,
+                display_name: row.get(12)?,
+                attribution_source: row.get(13)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let total_requests = rows.len();
+    let start_time_ms = rows.first().unwrap().timestamp_ms;
+    let end_time_ms = rows.last().unwrap().timestamp_ms;
+    let duration_seconds = ((end_time_ms - start_time_ms) / 1000).max(0);
+    let is_active = (now_ms - end_time_ms) <= ACTIVE_WINDOW_MS;
+    let last_cwd = rows.iter().rev().find_map(|r| r.cwd.clone());
+    let last_cc_version = rows.iter().rev().find_map(|r| r.cc_version.clone());
+    let title = session_title(session_id, last_cwd.as_deref());
+
+    let mut input_sum: i64 = 0;
+    let mut output_sum: i64 = 0;
+    let mut cache_read_sum: i64 = 0;
+    let mut cache_creation_sum: i64 = 0;
+
+    for r in &rows {
+        input_sum += r.input_tokens;
+        output_sum += r.output_tokens;
+        cache_read_sum += r.cache_read_tokens;
+        cache_creation_sum += r.cache_creation_tokens;
+    }
+    let totals = TokenTotals::new(input_sum, output_sum, cache_read_sum, cache_creation_sum);
+    let cache_hit_ratio = if input_sum + cache_read_sum == 0 {
+        0.0
+    } else {
+        cache_read_sum as f64 / (input_sum + cache_read_sum) as f64
+    };
+
+    let mean_tokens = if total_requests == 0 {
+        0.0
+    } else {
+        totals.total as f64 / total_requests as f64
+    };
+
+    let mut model_map: std::collections::BTreeMap<String, (TokenTotals, f64, i64, i64)> =
+        std::collections::BTreeMap::new();
+    let mut profile_map: std::collections::BTreeMap<Option<i64>, (String, TokenTotals, f64, i64, i64)> =
+        std::collections::BTreeMap::new();
+
+    let mut pulse_strip = Vec::with_capacity(total_requests);
+    let mut all_events = Vec::with_capacity(total_requests);
+
+    let mut prev_main_model: Option<String> = None;
+    let mut prev_main_profile: Option<Option<i64>> = None;
+
+    let mut session_cost_sum = 0.0;
+    let mut session_priced_tokens = 0i64;
+    let mut session_unpriced_tokens = 0i64;
+
+    for (idx, r) in rows.into_iter().enumerate() {
+        let row_total = r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_creation_tokens;
+        let is_spike = row_total >= 10_000 && (row_total as f64) >= 2.5 * mean_tokens;
+        let spike_reason = if is_spike {
+            if r.input_tokens >= row_total / 2 && r.cache_read_tokens < r.input_tokens {
+                Some("未缓存输入主导".to_string())
+            } else if r.cache_creation_tokens >= row_total / 3 {
+                Some("缓存写入/上下文填充".to_string())
+            } else if r.output_tokens >= row_total / 3 {
+                Some("长文本生成".to_string())
+            } else if r.cache_read_tokens >= row_total / 2 {
+                Some("缓存命中复用".to_string())
+            } else {
+                Some("吞吐突刺".to_string())
+            }
+        } else {
+            None
+        };
+
+        let unit = prices.get_unit_price(&r.model);
+        let cost = match unit {
+            Some(u) => {
+                let total = u.calculate(
+                    r.input_tokens,
+                    r.output_tokens,
+                    r.cache_read_tokens,
+                    r.cache_creation_tokens,
+                );
+                TokenCost {
+                    total,
+                    coverage: 1.0,
+                    is_complete: true,
+                    unpriced_tokens: 0,
+                }
+            }
+            None => TokenCost {
+                total: 0.0,
+                coverage: 0.0,
+                is_complete: false,
+                unpriced_tokens: row_total,
+            },
+        };
+
+        session_cost_sum += cost.total;
+        if cost.is_complete {
+            session_priced_tokens += row_total;
+        } else {
+            session_unpriced_tokens += cost.unpriced_tokens;
+            session_priced_tokens += row_total - cost.unpriced_tokens;
+        }
+
+        let (model_switched, profile_switched) = if !r.is_sidechain {
+            let m_sw = prev_main_model.as_ref().is_some_and(|m| m != &r.model);
+            let p_sw = prev_main_profile.as_ref().is_some_and(|p| p != &r.profile_id);
+            prev_main_model = Some(r.model.clone());
+            prev_main_profile = Some(r.profile_id);
+            (m_sw, p_sw)
+        } else {
+            (false, false)
+        };
+
+        // 聚合模型切片
+        {
+            let entry = model_map
+                .entry(r.model.clone())
+                .or_insert_with(|| (TokenTotals::default(), 0.0, 0, 0));
+            entry.0.input += r.input_tokens;
+            entry.0.output += r.output_tokens;
+            entry.0.cache_read += r.cache_read_tokens;
+            entry.0.cache_creation += r.cache_creation_tokens;
+            entry.0.total += row_total;
+            entry.1 += cost.total;
+            if cost.is_complete {
+                entry.2 += row_total;
+            } else {
+                entry.3 += cost.unpriced_tokens;
+                entry.2 += row_total - cost.unpriced_tokens;
+            }
+        }
+
+        // 聚合档案切片
+        {
+            let d_name = r
+                .display_name
+                .clone()
+                .unwrap_or_else(|| UNKNOWN_DISPLAY_NAME.to_string());
+            let entry = profile_map
+                .entry(r.profile_id)
+                .or_insert_with(|| (d_name, TokenTotals::default(), 0.0, 0, 0));
+            entry.1.input += r.input_tokens;
+            entry.1.output += r.output_tokens;
+            entry.1.cache_read += r.cache_read_tokens;
+            entry.1.cache_creation += r.cache_creation_tokens;
+            entry.1.total += row_total;
+            entry.2 += cost.total;
+            if cost.is_complete {
+                entry.3 += row_total;
+            } else {
+                entry.4 += cost.unpriced_tokens;
+                entry.3 += row_total - cost.unpriced_tokens;
+            }
+        }
+
+        pulse_strip.push(PulsePoint {
+            index: idx + 1,
+            timestamp_ms: r.timestamp_ms,
+            total_tokens: row_total,
+            cache_read_tokens: r.cache_read_tokens,
+            is_sidechain: r.is_sidechain,
+            is_spike,
+        });
+
+        all_events.push(FlightRecordEvent {
+            request_index: idx + 1,
+            record_id: r.record_id,
+            timestamp_ms: r.timestamp_ms,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            cache_read_tokens: r.cache_read_tokens,
+            cache_creation_tokens: r.cache_creation_tokens,
+            total_tokens: row_total,
+            model: r.model,
+            entrypoint: r.entrypoint,
+            is_sidechain: r.is_sidechain,
+            profile_id: r.profile_id,
+            attribution_source: r.attribution_source,
+            cost,
+            model_switched,
+            profile_switched,
+            is_spike,
+            spike_reason,
+        });
+    }
+
+    let max_events = limit.unwrap_or(200);
+    let (events, events_truncated) = if all_events.len() > max_events {
+        let start_idx = all_events.len() - max_events;
+        (all_events[start_idx..].to_vec(), true)
+    } else {
+        (all_events, false)
+    };
+
+    let mut models_used = Vec::new();
+    for (model, (m_tokens, m_cost, m_priced, m_unpriced)) in model_map {
+        let coverage = if m_tokens.total == 0 {
+            1.0
+        } else {
+            m_priced as f64 / m_tokens.total as f64
+        };
+        let cost = TokenCost {
+            total: m_cost,
+            coverage: if coverage.is_finite() { coverage } else { 1.0 },
+            is_complete: m_unpriced == 0,
+            unpriced_tokens: m_unpriced,
+        };
+        let share = if totals.total == 0 {
+            0.0
+        } else {
+            m_tokens.total as f64 / totals.total as f64
+        };
+        models_used.push(SessionModelSlice {
+            model,
+            tokens: m_tokens,
+            cost,
+            share,
+        });
+    }
+    models_used.sort_by_key(|a| std::cmp::Reverse(a.tokens.total));
+
+    let mut profiles_used = Vec::new();
+    for (profile_id, (display_name, p_tokens, p_cost, p_priced, p_unpriced)) in profile_map {
+        let coverage = if p_tokens.total == 0 {
+            1.0
+        } else {
+            p_priced as f64 / p_tokens.total as f64
+        };
+        let cost = TokenCost {
+            total: p_cost,
+            coverage: if coverage.is_finite() { coverage } else { 1.0 },
+            is_complete: p_unpriced == 0,
+            unpriced_tokens: p_unpriced,
+        };
+        profiles_used.push(SessionProfileSlice {
+            profile_id,
+            display_name,
+            tokens: p_tokens,
+            cost,
+        });
+    }
+    profiles_used.sort_by_key(|a| std::cmp::Reverse(a.tokens.total));
+
+    let session_coverage = if totals.total == 0 {
+        1.0
+    } else {
+        session_priced_tokens as f64 / totals.total as f64
+    };
+    let cost = TokenCost {
+        total: session_cost_sum,
+        coverage: if session_coverage.is_finite() { session_coverage } else { 1.0 },
+        is_complete: session_unpriced_tokens == 0,
+        unpriced_tokens: session_unpriced_tokens,
+    };
+
+    Ok(Some(SessionFlightRecorder {
+        session_id: session_id.to_string(),
+        title,
+        cwd: last_cwd,
+        cc_version: last_cc_version,
+        start_time_ms,
+        end_time_ms,
+        duration_seconds,
+        is_active,
+        total_requests,
+        totals,
+        cost,
+        cache_hit_ratio,
+        models_used,
+        profiles_used,
+        pulse_strip,
+        events,
+        events_truncated,
+    }))
 }

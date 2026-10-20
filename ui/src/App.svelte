@@ -21,6 +21,7 @@
   import ScanProgress from "./components/ScanProgress.svelte";
   import ErrorBanners from "./components/ErrorBanners.svelte";
   import ProxyBar from "./components/ProxyBar.svelte";
+  import FlightRecorder from "./components/FlightRecorder.svelte";
 
   const adapter: UiAdapter = createAdapter();
 
@@ -47,6 +48,7 @@
     db_readonly: false,
   });
   let fetchFailed = $state(false);
+  let selectedSessionId = $state<string | null>(null);
 
   let loadSeq = 0;
   let dirtyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -273,76 +275,87 @@
   <ErrorBanners {health} unavailable={fetchFailed} />
 
   {#if phase === "ready" && dashboard}
-    <section class="totals">
-      <div class="label-row">
-        <span class="label">{totalLabel}</span>
-        <div class="header-tags">
-          {#if dashboard.cost}
-            <span
-              class="cost-badge"
-              title={`${t("cost.estimateTooltip")} · ${formatCostPrecise(dashboard.cost.total)}`}
+    {#if selectedSessionId}
+      <FlightRecorder
+        sessionId={selectedSessionId}
+        {adapter}
+        onBack={() => (selectedSessionId = null)}
+      />
+    {:else}
+      <section class="totals">
+        <div class="label-row">
+          <span class="label">{totalLabel}</span>
+          <div class="header-tags">
+            {#if dashboard.cost}
+              <span
+                class="cost-badge"
+                title={`${t("cost.estimateTooltip")} · ${formatCostPrecise(dashboard.cost.total)}`}
+              >
+                <span class="cost-pattern hatch" aria-hidden="true"></span>
+                <span class="cost-label">{t("cost.estimated")}</span>
+                <span class="cost-value">{formatCost(dashboard.cost.total)}</span>
+                {#if !dashboard.cost.is_complete}
+                  <span
+                    class="unpriced-mark"
+                    title={t("cost.unpricedNote", {
+                      n: formatCompact(dashboard.cost.unpriced_tokens),
+                    })}>*</span
+                  >
+                {/if}
+              </span>
+            {/if}
+            {#if health.skipped_files > 0}
+              <span class="badge"
+                >{t("health.skipped", { n: health.skipped_files })}</span
+              >
+            {/if}
+            <button
+              type="button"
+              class="theme-toggle-btn"
+              onclick={cycleTheme}
+              title={t("theme.toggleTooltip", { theme: themeLabel })}
+              aria-label={t("theme.toggleTooltip", { theme: themeLabel })}
             >
-              <span class="cost-pattern hatch" aria-hidden="true"></span>
-              <span class="cost-label">{t("cost.estimated")}</span>
-              <span class="cost-value">{formatCost(dashboard.cost.total)}</span>
-              {#if !dashboard.cost.is_complete}
-                <span
-                  class="unpriced-mark"
-                  title={t("cost.unpricedNote", {
-                    n: formatCompact(dashboard.cost.unpriced_tokens),
-                  })}>*</span
-                >
-              {/if}
-            </span>
-          {/if}
-          {#if health.skipped_files > 0}
-            <span class="badge"
-              >{t("health.skipped", { n: health.skipped_files })}</span
-            >
-          {/if}
-          <button
-            type="button"
-            class="theme-toggle-btn"
-            onclick={cycleTheme}
-            title={t("theme.toggleTooltip", { theme: themeLabel })}
-            aria-label={t("theme.toggleTooltip", { theme: themeLabel })}
-          >
-            <span class="theme-icon" aria-hidden="true">◓</span>
-            <span>{themeLabel}</span>
-          </button>
+              <span class="theme-icon" aria-hidden="true">◓</span>
+              <span>{themeLabel}</span>
+            </button>
+          </div>
         </div>
-      </div>
-      <div class="big"><Digits value={dashboard.totals.total} /></div>
-      <div class="breakdown">
-        <span
-          >{t("breakdown.input")}
-          {formatCompact(dashboard.totals.input)}</span
-        >
-        <span
-          >{t("breakdown.output")}
-          {formatCompact(dashboard.totals.output)}</span
-        >
-        <span
-          >{t("breakdown.cacheRead")}
-          {formatCompact(dashboard.totals.cache_read)}</span
-        >
-        <span
-          >{t("breakdown.cacheWrite")}
-          {formatCompact(dashboard.totals.cache_creation)}</span
-        >
-      </div>
-    </section>
+        <div class="big"><Digits value={dashboard.totals.total} /></div>
+        <div class="breakdown">
+          <span
+            >{t("breakdown.input")}
+            {formatCompact(dashboard.totals.input)}</span
+          >
+          <span
+            >{t("breakdown.output")}
+            {formatCompact(dashboard.totals.output)}</span
+          >
+          <span
+            >{t("breakdown.cacheRead")}
+            {formatCompact(dashboard.totals.cache_read)}</span
+          >
+          <span
+            >{t("breakdown.cacheWrite")}
+            {formatCompact(dashboard.totals.cache_creation)}</span
+          >
+        </div>
+      </section>
 
-    <RangeChips value={range} onchange={setRange} />
-    <Chart {pulses} />
-    <ModelsBar models={dashboard.models} />
-    <ProxyBar {adapter} />
-    <ProfileCards
-      profiles={dashboard.profiles}
-      onUpdateProfile={handleUpdateProfile}
-      onSyncQuota={handleSyncQuota}
-    />
-    <SessionList sessions={dashboard.sessions} />
+      <RangeChips value={range} onchange={setRange} />
+      <Chart {pulses} />
+      <ModelsBar models={dashboard.models} />
+      <ProxyBar {adapter} />
+      <ProfileCards
+        profiles={dashboard.profiles}
+        onUpdateProfile={handleUpdateProfile}
+        onSyncQuota={handleSyncQuota}
+      />
+      <SessionList
+        sessions={dashboard.sessions}
+        onSelect={(id) => (selectedSessionId = id)}
+      />
+    {/if}
   {:else}
     <ScanProgress status={scan} />
   {/if}

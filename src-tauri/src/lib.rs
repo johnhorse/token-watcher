@@ -201,6 +201,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_dashboard,
             commands::get_scan_status,
+            commands::get_session_flight_recorder,
             commands::update_profile_display,
             commands::update_profile_quota,
             commands::reassign_usage,
