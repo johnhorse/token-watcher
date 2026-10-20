@@ -131,6 +131,49 @@ pub fn update_profile_quota(
     emit_dirty(&app);
     Ok(())
 }
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn update_profile_quota_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: i64,
+    quota_type: String,
+    unit: String,
+    api_url: Option<String>,
+    api_key: Option<String>,
+    manual_total: Option<f64>,
+    manual_used: Option<f64>,
+    reset_date: Option<String>,
+) -> Result<(), String> {
+    with_write_store(&state, |store| {
+        store
+            .update_profile_quota_config(
+                profile_id,
+                &quota_type,
+                &unit,
+                api_url.as_deref(),
+                api_key.as_deref(),
+                manual_total,
+                manual_used,
+                reset_date.as_deref(),
+            )
+            .map_err(|e| e.to_string())
+    })?;
+    emit_dirty(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sync_profile_quota(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: i64,
+) -> Result<agg::QuotaInfo, String> {
+    let syncer = state.quota_syncer.clone();
+    let result = syncer.sync_profile(profile_id).await;
+    emit_dirty(&app);
+    result
+}
 
 #[tauri::command]
 pub fn reassign_usage(

@@ -23,8 +23,9 @@ pub mod watch;
 
 use std::sync::mpsc;
 use std::sync::Mutex;
+use std::time::Duration;
 
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
 use app_lock::{AppLock, LockError};
 use app_settings::AppSettings;
@@ -44,6 +45,8 @@ pub struct AppState {
     pub proxy: Mutex<Option<std::sync::Arc<proxy::ProxyState>>>,
     /// 成本估算价格表管理器
     pub pricing: std::sync::Arc<core::pricing::PriceManager>,
+    /// 自动配额同步器
+    pub quota_syncer: std::sync::Arc<core::quota::QuotaSyncer>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -103,7 +106,7 @@ pub fn run() {
             let data = watch::spawn(app.handle().clone(), paths, tray_tx);
             let proxy_state = match tauri::async_runtime::block_on(proxy::start_proxy_server(
                 data.sender(),
-                claude_settings_path,
+                claude_settings_path.clone(),
                 proxy::DEFAULT_PORT,
             )) {
                 Ok((st, _join)) => {
@@ -132,6 +135,38 @@ pub fn run() {
             let data_dir = db_path.parent().unwrap_or(std::path::Path::new("."));
             let pricing = std::sync::Arc::new(core::pricing::PriceManager::new(data_dir));
             pricing.clone().spawn_background_refresher(Some(app.handle().clone()));
+            let quota_syncer = std::sync::Arc::new(core::quota::QuotaSyncer::new(
+                db_path.clone(),
+                claude_settings_path.clone(),
+            ));
+            // 启动后台 QuotaSyncer 定时轮询（每 10 分钟轮询一次所有 API 档案，等待首扫完成）
+            {
+                let syncer = quota_syncer.clone();
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // 等待首扫完成
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        if let Some(state) = app_handle.try_state::<AppState>() {
+                            if let Ok(guard) = state.status.lock() {
+                                if guard.phase == "done" || guard.phase == "empty" {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // 首扫完成后首次拉取
+                    syncer.sync_all_active_profiles().await;
+                    let _ = app_handle.emit("dashboard-dirty", ());
+
+                    // 定时 10 分钟轮询
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(600)).await;
+                        syncer.sync_all_active_profiles().await;
+                        let _ = app_handle.emit("dashboard-dirty", ());
+                    }
+                });
+            }
             app.manage(AppState {
                 _lock: Mutex::new(Some(lock)),
                 data: Mutex::new(Some(data)),
@@ -140,6 +175,7 @@ pub fn run() {
                 db_path,
                 proxy: Mutex::new(proxy_state),
                 pricing,
+                quota_syncer,
             });
             Ok(())
         })
@@ -175,7 +211,9 @@ pub fn run() {
             commands::set_hud_visible,
             commands::set_hud_locked,
             commands::save_hud_position,
-            commands::show_main_window
+            commands::show_main_window,
+            commands::update_profile_quota_config,
+            commands::sync_profile_quota
         ])
         .build(tauri::generate_context!());
 

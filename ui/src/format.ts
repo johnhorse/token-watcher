@@ -33,6 +33,38 @@ export function formatCostPrecise(value: number | null | undefined): string {
   return `$${value.toFixed(4)}`;
 }
 
+export function formatCurrency(
+  value: number | null | undefined,
+  unit: "usd" | "cny" | "tokens" = "usd",
+): string {
+  if (value === null || value === undefined || isNaN(value)) return "—";
+  const symbol = unit === "cny" ? "¥" : "$";
+  if (unit === "tokens") {
+    return formatCompact(value);
+  }
+  if (value === 0) return `${symbol}0.00`;
+  if (Math.abs(value) >= 10.0) {
+    return `${symbol}${value.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  }
+  if (Math.abs(value) >= 0.01) {
+    return `${symbol}${value.toFixed(2)}`;
+  }
+  return `${symbol}${value.toFixed(4)}`;
+}
+
+export function parseAmountInput(input: string): {
+  value: number | null;
+  error?: string;
+} {
+  const trimmed = input.trim().replace(/[,_\s$¥]/g, "");
+  if (!trimmed) return { value: null };
+  const num = parseFloat(trimmed);
+  if (isNaN(num) || num < 0) return { value: null, error: "invalid" };
+  return { value: Math.round(num * 10000) / 10000 };
+}
 
 export function parseTokenInput(input: string): {
   value: number | null;

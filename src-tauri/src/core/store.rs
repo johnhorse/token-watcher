@@ -21,7 +21,7 @@ use super::parse::UsageRecord;
 use super::CoreError;
 
 /// 当前 schema 版本。加表/改表时递增并在 migrate 里追加版本迁移分支。
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// 每条 SQL 事务提交的用量记录条数
 pub const UPSERT_BATCH: usize = 500;
@@ -393,6 +393,29 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        if version < 5 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(
+                "ALTER TABLE profiles ADD COLUMN quota_type TEXT NOT NULL DEFAULT 'manual';
+                 ALTER TABLE profiles ADD COLUMN quota_unit TEXT NOT NULL DEFAULT 'usd';
+                 ALTER TABLE profiles ADD COLUMN quota_api_url TEXT;
+                 ALTER TABLE profiles ADD COLUMN quota_api_key TEXT;
+                 ALTER TABLE profiles ADD COLUMN quota_total REAL;
+                 ALTER TABLE profiles ADD COLUMN quota_used REAL;
+                 ALTER TABLE profiles ADD COLUMN quota_updated_at INTEGER;
+                 ALTER TABLE profiles ADD COLUMN quota_sync_status TEXT;
+                 ALTER TABLE profiles ADD COLUMN quota_sync_error TEXT;
+
+                 UPDATE profiles
+                 SET quota_total = quota_manual_total,
+                     quota_used = quota_manual_used,
+                     quota_unit = 'tokens'
+                 WHERE quota_manual_total IS NOT NULL AND quota_total IS NULL;
+
+                 PRAGMA user_version = 5;",
+            )?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -615,11 +638,127 @@ impl Store {
     ) -> Result<bool, CoreError> {
         let affected = self.conn.execute(
             "UPDATE profiles
-             SET quota_manual_total = ?1, quota_manual_used = ?2, quota_reset_date = ?3
+             SET quota_manual_total = ?1,
+                 quota_manual_used = ?2,
+                 quota_reset_date = ?3,
+                 quota_total = ?1,
+                 quota_used = ?2,
+                 quota_type = 'manual',
+                 quota_unit = 'tokens'
              WHERE id = ?4",
             params![total, used, reset_date, profile_id],
         )?;
         Ok(affected > 0)
+    }
+    /// 更新档案配额配置（v0.2 自动配额单一真源写入口）
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_profile_quota_config(
+        &mut self,
+        profile_id: ProfileId,
+        quota_type: &str,
+        quota_unit: &str,
+        quota_api_url: Option<&str>,
+        quota_api_key: Option<&str>,
+        manual_total: Option<f64>,
+        manual_used: Option<f64>,
+        reset_date: Option<&str>,
+    ) -> Result<bool, CoreError> {
+        let quota_type_clean = if quota_type == "api" { "api" } else { "manual" };
+        let unit_clean = if quota_unit == "tokens" || quota_unit == "cny" {
+            quota_unit
+        } else {
+            "usd"
+        };
+
+        let total_val = if quota_type_clean == "manual" {
+            manual_total
+        } else {
+            None
+        };
+        let used_val = if quota_type_clean == "manual" {
+            manual_used
+        } else {
+            None
+        };
+        let manual_total_int = manual_total.map(|v| v as i64);
+        let manual_used_int = manual_used.map(|v| v as i64);
+
+        let affected = self.conn.execute(
+            "UPDATE profiles
+             SET quota_type = ?1,
+                 quota_unit = ?2,
+                 quota_api_url = ?3,
+                 quota_api_key = COALESCE(?4, quota_api_key),
+                 quota_total = CASE WHEN ?1 = 'manual' THEN ?5 ELSE quota_total END,
+                 quota_used = CASE WHEN ?1 = 'manual' THEN ?6 ELSE quota_used END,
+                 quota_reset_date = ?7,
+                 quota_manual_total = ?8,
+                 quota_manual_used = ?9,
+                 quota_sync_status = CASE WHEN ?1 = 'manual' THEN NULL ELSE quota_sync_status END,
+                 quota_sync_error = CASE WHEN ?1 = 'manual' THEN NULL ELSE quota_sync_error END
+             WHERE id = ?10",
+            params![
+                quota_type_clean,
+                unit_clean,
+                quota_api_url,
+                quota_api_key,
+                total_val,
+                used_val,
+                reset_date,
+                manual_total_int,
+                manual_used_int,
+                profile_id,
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// 保存后台或手动 API 配额拉取结果（带在途写入保护：仅当 quota_type = 'api' 时更新）
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_profile_quota_sync_result(
+        &mut self,
+        profile_id: ProfileId,
+        total: Option<f64>,
+        used: Option<f64>,
+        reset_date: Option<&str>,
+        sync_status: &str,
+        sync_error: Option<&str>,
+        now_ms: i64,
+    ) -> Result<bool, CoreError> {
+        let affected = if sync_status == "ok" {
+            self.conn.execute(
+                "UPDATE profiles
+                 SET quota_total = ?1,
+                     quota_used = ?2,
+                     quota_reset_date = COALESCE(?3, quota_reset_date),
+                     quota_sync_status = ?4,
+                     quota_sync_error = NULL,
+                     quota_updated_at = ?5
+                 WHERE id = ?6 AND quota_type = 'api'",
+                params![total, used, reset_date, sync_status, now_ms, profile_id],
+            )?
+        } else {
+            self.conn.execute(
+                "UPDATE profiles
+                 SET quota_sync_status = ?1,
+                     quota_sync_error = ?2,
+                     quota_updated_at = ?3
+                 WHERE id = ?4 AND quota_type = 'api'",
+                params![sync_status, sync_error, now_ms, profile_id],
+            )?
+        };
+        Ok(affected > 0)
+    }
+
+    /// 列出所有启用了 API 自动同步的档案 ID
+    pub fn list_api_quota_profiles(&self) -> Result<Vec<ProfileId>, CoreError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM profiles WHERE quota_type = 'api'",
+        )?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// 每条用量记录的归因（record_id → profile_id），按时间排序；测试/诊断用。

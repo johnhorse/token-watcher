@@ -278,9 +278,14 @@ fn profile_model_session_distribution_and_ordering() {
     assert_eq!(
         card_a.quota,
         Some(QuotaInfo {
-            total: Some(2_000_000),
-            used: Some(350_000),
+            quota_type: "manual".to_string(),
+            unit: "tokens".to_string(),
+            total: Some(2_000_000.0),
+            used: Some(350_000.0),
             reset_date: Some("2026-11-01".to_string()),
+            updated_at: None,
+            sync_status: None,
+            sync_error: None,
         })
     );
     let card_b = card(Some(b_id));

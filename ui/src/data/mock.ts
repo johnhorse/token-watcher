@@ -174,8 +174,8 @@ const displayNames = new Map<number, string>();
 const quotaOverrides = new Map<number, Quota | null>();
 
 const defaultQuotas = new Map<number, Quota | null>([
-  [1, { total: 20_000_000, used: 15_600_000, reset_date: plusDays(14) }],
-  [2, { total: 3_000_000, used: 1_240_000, reset_date: null }],
+  [1, { quota_type: "api", unit: "usd", total: 50.0, used: 12.35, reset_date: plusDays(14), updated_at: Date.now(), sync_status: "ok", sync_error: null }],
+  [2, { quota_type: "manual", unit: "tokens", total: 3_000_000, used: 1_240_000, reset_date: null, updated_at: null, sync_status: null, sync_error: null }],
   [3, null],
 ]);
 
@@ -398,10 +398,41 @@ export function createMockAdapter(): UiAdapter {
     },
 
     async updateProfileQuota(profileId, quota) {
-      quotaOverrides.set(profileId, { ...quota });
+      quotaOverrides.set(profileId, { ...quota, quota_type: "manual", unit: "tokens" });
       for (const cb of dirtySubs) cb();
     },
 
+    async updateProfileQuotaConfig(profileId, config) {
+      const isManual = config.quota_type === "manual";
+      quotaOverrides.set(profileId, {
+        quota_type: config.quota_type as 'manual' | 'api',
+        unit: config.unit as 'usd' | 'tokens' | 'cny',
+        total: isManual ? (config.manual_total ?? null) : 50.0,
+        used: isManual ? (config.manual_used ?? null) : 12.35,
+        reset_date: config.reset_date ?? null,
+        updated_at: Date.now(),
+        sync_status: isManual ? null : "ok",
+        sync_error: null,
+      });
+      for (const cb of dirtySubs) cb();
+    },
+
+    async syncProfileQuota(profileId) {
+      const current = quotaOverrides.get(profileId) ?? defaultQuotas.get(profileId);
+      const updated: Quota = {
+        quota_type: "api",
+        unit: current?.unit ?? "usd",
+        total: current?.total ?? 50.0,
+        used: (current?.used ?? 10.0) + 1.25,
+        reset_date: current?.reset_date ?? plusDays(10),
+        updated_at: Date.now(),
+        sync_status: "ok",
+        sync_error: null,
+      };
+      quotaOverrides.set(profileId, updated);
+      for (const cb of dirtySubs) cb();
+      return updated;
+    },
     async reassignUsage() {
       // mock 无归因时间线，保留接口形状
     },

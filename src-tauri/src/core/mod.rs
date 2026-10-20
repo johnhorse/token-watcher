@@ -10,6 +10,7 @@ pub mod parse;
 pub mod store;
 pub mod pricing;
 
+pub mod quota;
 use std::fmt;
 
 /// core 层统一错误：IO / SQLite / 其他

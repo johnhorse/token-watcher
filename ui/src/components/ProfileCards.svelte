@@ -1,10 +1,12 @@
 <script lang="ts">
-  // T6 —— 订阅档案卡：推断标签恒显示；配额条纯手动语义；Unknown 卡置灰、无配额条；卡片内展开编辑。
+  // T6 —— 订阅档案卡：推断标签恒显示；自动/手动双模配额；诚实透支呈现；刷新按钮与编辑模态窗。
   import {
     formatCompact,
     formatExact,
     formatPercent,
+    formatCurrency,
     parseTokenInput,
+    parseAmountInput,
     formatCost,
     formatCostPrecise,
   } from "../format";
@@ -14,37 +16,59 @@
   let {
     profiles,
     onUpdateProfile,
+    onSyncQuota,
   }: {
     profiles: ProfileCard[];
     onUpdateProfile?: (
       profileId: number,
       displayName: string,
       quota: {
+        quota_type?: string;
+        unit?: string;
+        api_url?: string | null;
+        api_key?: string | null;
         total: number | null;
         used: number | null;
         reset_date: string | null;
       },
     ) => Promise<void>;
+    onSyncQuota?: (profileId: number) => Promise<unknown>;
   } = $props();
 
   let editingId = $state<number | null>(null);
   let editName = $state("");
+  let editMode = $state<"manual" | "api">("manual");
+  let editUnit = $state<"usd" | "tokens" | "cny">("usd");
+  let editApiUrl = $state("");
+  let editApiKey = $state("");
   let editTotalStr = $state("");
   let editUsedStr = $state("");
   let editResetDate = $state("");
   let saving = $state(false);
   let saveError = $state<string | null>(null);
 
-  let parsedTotal = $derived(parseTokenInput(editTotalStr));
-  let parsedUsed = $derived(parseTokenInput(editUsedStr));
+  // 同步加载状态跟踪
+  let syncingIds = $state<Record<number, boolean>>({});
+
+  let parsedTotal = $derived(
+    editUnit === "tokens" ? parseTokenInput(editTotalStr) : parseAmountInput(editTotalStr),
+  );
+  let parsedUsed = $derived(
+    editUnit === "tokens" ? parseTokenInput(editUsedStr) : parseAmountInput(editUsedStr),
+  );
   let canSave = $derived(
-    editName.trim().length > 0 && !parsedTotal.error && !parsedUsed.error,
+    editName.trim().length > 0 &&
+      (editMode === "api" || (!parsedTotal.error && !parsedUsed.error)),
   );
 
   function startEdit(profile: ProfileCard) {
     if (profile.profile_id === null) return;
     editingId = profile.profile_id;
     editName = profile.display_name;
+    editMode = profile.quota?.quota_type === "api" ? "api" : "manual";
+    editUnit = profile.quota?.unit === "cny" ? "cny" : profile.quota?.unit === "tokens" ? "tokens" : "usd";
+    editApiUrl = "";
+    editApiKey = "";
     editTotalStr =
       profile.quota?.total != null ? String(profile.quota.total) : "";
     editUsedStr = profile.quota?.used != null ? String(profile.quota.used) : "";
@@ -65,8 +89,12 @@
     saveError = null;
     try {
       await onUpdateProfile(profileId, editName.trim(), {
-        total: parsedTotal.value,
-        used: parsedUsed.value,
+        quota_type: editMode,
+        unit: editUnit,
+        api_url: editMode === "api" && editApiUrl.trim() ? editApiUrl.trim() : null,
+        api_key: editMode === "api" && editApiKey.trim() ? editApiKey.trim() : null,
+        total: editMode === "manual" ? parsedTotal.value : null,
+        used: editMode === "manual" ? parsedUsed.value : null,
         reset_date: editResetDate || null,
       });
       editingId = null;
@@ -74,6 +102,18 @@
       saveError = err instanceof Error ? err.message : String(err);
     } finally {
       saving = false;
+    }
+  }
+
+  async function triggerSync(profileId: number) {
+    if (!onSyncQuota || syncingIds[profileId]) return;
+    syncingIds = { ...syncingIds, [profileId]: true };
+    try {
+      await onSyncQuota(profileId);
+    } catch (err) {
+      console.error("Quota sync failed:", err);
+    } finally {
+      syncingIds = { ...syncingIds, [profileId]: false };
     }
   }
 
@@ -92,7 +132,8 @@
     ) {
       return null;
     }
-    return Math.min(100, Math.max(0, (quota.used / quota.total) * 100));
+    // 允许透支，不封顶 100%
+    return Math.max(0, (quota.used / quota.total) * 100);
   }
 
   function resetInfo(profile: ProfileCard): ResetInfo | null {
@@ -111,6 +152,14 @@
       ? { key: "profiles.resetToday", params: {} }
       : { key: "profiles.resetPast", params: {} };
   }
+
+  function formatQuotaValue(value: number | null | undefined, unit: string | undefined): string {
+    if (value === null || value === undefined) return "—";
+    if (unit === "tokens") {
+      return formatCompact(value);
+    }
+    return formatCurrency(value, unit === "cny" ? "cny" : "usd");
+  }
 </script>
 
 <section class="section">
@@ -119,8 +168,12 @@
     {#each profiles as profile (profile.profile_id ?? "unknown")}
       {@const unknown = profile.profile_id === null}
       {@const pct = unknown ? null : percent(profile)}
+      {@const isOverdraft = pct !== null && pct > 100}
       {@const reset = unknown ? null : resetInfo(profile)}
       {@const name = unknown ? t("profiles.unknown") : profile.display_name}
+      {@const quota = profile.quota}
+      {@const isApi = quota?.quota_type === "api"}
+      {@const isSyncing = profile.profile_id !== null && !!syncingIds[profile.profile_id]}
       <li class="card" class:unknown>
         <div class="head">
           <span class="name" title={name}>{name}</span>
@@ -166,7 +219,33 @@
             {#if profile.inferred}
               <span class="tag">{t("profiles.inferred")}</span>
             {/if}
-            {#if profile.quota}
+            {#if isApi}
+              <span class="tag api">
+                {t("profiles.autoApi")} {quota?.unit === "cny" ? "¥" : "$"}
+              </span>
+              {#if profile.profile_id !== null}
+                <button
+                  type="button"
+                  class="refresh-icon-btn"
+                  class:rotating={isSyncing}
+                  disabled={isSyncing}
+                  title={quota?.sync_status === "error"
+                    ? (quota?.sync_error ?? t("profiles.refreshTooltip"))
+                    : quota?.sync_status === "inactive"
+                    ? t("profiles.syncInactive")
+                    : t("profiles.refreshTooltip")}
+                  onclick={() => triggerSync(profile.profile_id!)}
+                >
+                  {#if quota?.sync_status === "error"}
+                    <span class="err-icon">!</span>
+                  {:else if quota?.sync_status === "inactive"}
+                    <span class="inactive-icon">◌</span>
+                  {:else}
+                    ↻
+                  {/if}
+                </button>
+              {/if}
+            {:else if quota}
               <span class="tag">{t("profiles.manual")}</span>
             {/if}
           </span>
@@ -190,52 +269,98 @@
                 required
               />
             </div>
+
+            <!-- 配额模式与单位切换 -->
             <div class="grid-2">
               <div class="field">
-                <div class="label-row">
-                  <label for="total-{profile.profile_id}"
-                    >{t("profiles.totalLabel")}</label
-                  >
-                  {#if parsedTotal.value !== null}
-                    <span class="preview"
-                      >{formatExact(parsedTotal.value)}</span
-                    >
-                  {:else if parsedTotal.error}
-                    <span class="preview error"
-                      >{t("profiles.invalidNumber")}</span
-                    >
-                  {:else}
-                    <span class="preview hint">{t("profiles.noLimit")}</span>
-                  {/if}
-                </div>
+                <label for="mode-{profile.profile_id}">{t("profiles.modeLabel")}</label>
+                <select id="mode-{profile.profile_id}" bind:value={editMode} class="select-input">
+                  <option value="manual">{t("profiles.modeManual")}</option>
+                  <option value="api">{t("profiles.modeApi")}</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="unit-{profile.profile_id}">{t("profiles.unitLabel")}</label>
+                <select id="unit-{profile.profile_id}" bind:value={editUnit} class="select-input">
+                  <option value="usd">{t("profiles.unitUsd")}</option>
+                  <option value="cny">{t("profiles.unitCny")}</option>
+                  <option value="tokens">{t("profiles.unitTokens")}</option>
+                </select>
+              </div>
+            </div>
+
+            {#if editMode === "api"}
+              <!-- 自动配额专属输入项 -->
+              <div class="field">
+                <label for="api-url-{profile.profile_id}">{t("profiles.apiUrlLabel")}</label>
                 <input
-                  id="total-{profile.profile_id}"
+                  id="api-url-{profile.profile_id}"
                   type="text"
-                  bind:value={editTotalStr}
-                  placeholder={t("profiles.tokenHint")}
+                  bind:value={editApiUrl}
+                  placeholder={t("profiles.apiUrlPlaceholder")}
                 />
               </div>
               <div class="field">
-                <div class="label-row">
-                  <label for="used-{profile.profile_id}"
-                    >{t("profiles.usedLabel")}</label
-                  >
-                  {#if parsedUsed.value !== null}
-                    <span class="preview">{formatExact(parsedUsed.value)}</span>
-                  {:else if parsedUsed.error}
-                    <span class="preview error"
-                      >{t("profiles.invalidNumber")}</span
-                    >
-                  {/if}
-                </div>
+                <label for="api-key-{profile.profile_id}">{t("profiles.apiKeyLabel")}</label>
                 <input
-                  id="used-{profile.profile_id}"
-                  type="text"
-                  bind:value={editUsedStr}
-                  placeholder={t("profiles.tokenHint")}
+                  id="api-key-{profile.profile_id}"
+                  type="password"
+                  bind:value={editApiKey}
+                  placeholder={t("profiles.apiKeyPlaceholder")}
                 />
               </div>
-            </div>
+            {:else}
+              <!-- 手动模式专属输入项 -->
+              <div class="grid-2">
+                <div class="field">
+                  <div class="label-row">
+                    <label for="total-{profile.profile_id}"
+                      >{t("profiles.totalLabel")}</label
+                    >
+                    {#if parsedTotal.value !== null}
+                      <span class="preview"
+                        >{editUnit === "tokens" ? formatExact(parsedTotal.value) : formatCurrency(parsedTotal.value, editUnit)}</span
+                      >
+                    {:else if parsedTotal.error}
+                      <span class="preview error"
+                        >{t("profiles.invalidNumber")}</span
+                      >
+                    {:else}
+                      <span class="preview hint">{t("profiles.noLimit")}</span>
+                    {/if}
+                  </div>
+                  <input
+                    id="total-{profile.profile_id}"
+                    type="text"
+                    bind:value={editTotalStr}
+                    placeholder={editUnit === "tokens" ? t("profiles.tokenHint") : t("profiles.amountHint")}
+                  />
+                </div>
+                <div class="field">
+                  <div class="label-row">
+                    <label for="used-{profile.profile_id}"
+                      >{t("profiles.usedLabel")}</label
+                    >
+                    {#if parsedUsed.value !== null}
+                      <span class="preview">
+                        {editUnit === "tokens" ? formatExact(parsedUsed.value) : formatCurrency(parsedUsed.value, editUnit)}
+                      </span>
+                    {:else if parsedUsed.error}
+                      <span class="preview error"
+                        >{t("profiles.invalidNumber")}</span
+                      >
+                    {/if}
+                  </div>
+                  <input
+                    id="used-{profile.profile_id}"
+                    type="text"
+                    bind:value={editUsedStr}
+                    placeholder={editUnit === "tokens" ? t("profiles.tokenHint") : t("profiles.amountHint")}
+                  />
+                </div>
+              </div>
+            {/if}
+
             <div class="field">
               <label for="reset-{profile.profile_id}"
                 >{t("profiles.resetLabel")}</label
@@ -268,17 +393,41 @@
             </div>
           </form>
         {:else if !unknown && pct !== null}
-          <div class="bar">
-            <span style:width={`${pct}%`}></span>
+          <div class="bar" class:overdraft={isOverdraft}>
+            <span style:width={`${Math.min(100, pct)}%`} class:overdraft-span={isOverdraft}></span>
           </div>
           <div class="caption">
-            <span>{t("profiles.quotaUsed", { pct: formatPercent(pct) })}</span>
-            <span
-              >{t("profiles.quotaOf", {
-                used: formatCompact(profile.quota?.used ?? 0),
-                total: formatCompact(profile.quota?.total ?? 0),
-              })}</span
-            >
+            {#if isOverdraft}
+              <span class="overdraft-text">
+                {t("profiles.quotaHonestOverdraft", {
+                  used: formatQuotaValue(quota?.used, quota?.unit),
+                  total: formatQuotaValue(quota?.total, quota?.unit),
+                  pct: formatPercent(pct),
+                  overdraft: formatQuotaValue((quota?.used ?? 0) - (quota?.total ?? 0), quota?.unit),
+                })}
+              </span>
+            {:else}
+              <span>
+                {t("profiles.quotaHonestRemaining", {
+                  used: formatQuotaValue(quota?.used, quota?.unit),
+                  total: formatQuotaValue(quota?.total, quota?.unit),
+                  pct: formatPercent(pct),
+                  remaining: formatQuotaValue((quota?.total ?? 0) - (quota?.used ?? 0), quota?.unit),
+                })}
+              </span>
+            {/if}
+            {#if reset}
+              <span>{t(reset.key, reset.params)}</span>
+            {/if}
+          </div>
+        {:else if !unknown && quota?.used != null && (quota?.total == null || quota?.total <= 0)}
+          <!-- 无上限额度展示 -->
+          <div class="caption">
+            <span>
+              {t("profiles.quotaUnlimited", {
+                used: formatQuotaValue(quota?.used, quota?.unit),
+              })}
+            </span>
             {#if reset}
               <span>{t(reset.key, reset.params)}</span>
             {/if}
@@ -359,6 +508,7 @@
   }
   .tags {
     display: flex;
+    align-items: center;
     gap: 4px;
     flex-shrink: 0;
   }
@@ -372,15 +522,75 @@
     padding: 1px 4px;
     white-space: nowrap;
   }
+  .tag.api {
+    color: var(--accent);
+    border-color: var(--accent);
+    font-weight: 500;
+  }
+  .refresh-icon-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-2);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0 2px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    transition: transform 0.2s ease, color 0.15s ease;
+  }
+  .refresh-icon-btn:hover:not(:disabled) {
+    color: var(--text-1);
+  }
+  .refresh-icon-btn.rotating {
+    animation: spin 1s linear infinite;
+    cursor: not-allowed;
+    opacity: 0.7;
+  }
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .err-icon {
+    color: #ef4444;
+    font-weight: bold;
+  }
+  .inactive-icon {
+    color: var(--text-2);
+    opacity: 0.6;
+  }
   .bar {
-    height: 3px;
+    height: 4px;
     background: var(--track);
     margin: 8px 0 5px;
+    border-radius: 2px;
+    overflow: hidden;
   }
   .bar span {
     display: block;
     height: 100%;
     background: var(--text-2);
+  }
+  /* Meter Face 诚实透支呈现：45° 斜线纹理与醒目色 */
+  .bar.overdraft {
+    background: repeating-linear-gradient(
+      45deg,
+      #dc2626,
+      #dc2626 4px,
+      #991b1b 4px,
+      #991b1b 8px
+    );
+  }
+  .bar.overdraft span.overdraft-span {
+    background: transparent;
+  }
+  .overdraft-text {
+    color: #ef4444 !important;
+    font-weight: 500;
   }
   .caption {
     display: flex;
@@ -402,14 +612,12 @@
     border: 1px solid var(--line-strong);
     border-radius: var(--radius);
     color: var(--text-2);
-    font-size: 9px;
-    font-family: var(--font-ui);
-    padding: 1px 5px;
+    font-size: 10px;
+    padding: 1px 6px;
     cursor: pointer;
-    line-height: 1.3;
   }
   .edit-btn:hover {
-    color: var(--text);
+    color: var(--text-1);
     border-color: var(--text-2);
   }
   .edit-form {
@@ -418,93 +626,86 @@
     gap: 8px;
     margin-top: 10px;
     padding-top: 8px;
-    border-top: 1px dashed var(--line);
-  }
-  .grid-2 {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
+    border-top: 1px solid var(--line);
   }
   .field {
     display: flex;
     flex-direction: column;
     gap: 3px;
   }
+  .field label {
+    font-size: 10px;
+    color: var(--text-2);
+  }
+  .field input,
+  .select-input {
+    background: var(--bg-1, rgba(0, 0, 0, 0.03));
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    color: var(--text-1);
+    font-family: var(--font-num);
+    font-size: 11px;
+    padding: 4px 6px;
+  }
+  .field input:focus,
+  .select-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
   .label-row {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 4px;
-  }
-  label {
-    font-size: 10px;
-    color: var(--text-2);
   }
   .preview {
     font-family: var(--font-num);
     font-size: 9.5px;
-    color: var(--amber);
+    color: var(--text-2);
+    font-variant-numeric: tabular-nums;
   }
   .preview.error {
-    color: #e06c75;
+    color: #ef4444;
   }
   .preview.hint {
     color: var(--text-2);
-  }
-  input[type="text"],
-  input[type="date"] {
-    background: var(--bg);
-    border: 1px solid var(--line-strong);
-    border-radius: var(--radius);
-    color: var(--text);
-    font-family: var(--font-num);
-    font-size: 11px;
-    padding: 4px 6px;
-    box-sizing: border-box;
-    width: 100%;
-  }
-  input[type="text"]:focus,
-  input[type="date"]:focus {
-    outline: 1px solid var(--amber);
-    border-color: var(--amber);
+    opacity: 0.6;
   }
   .error-msg {
-    color: #e06c75;
-    font-size: 10px;
+    font-size: 10.5px;
+    color: #ef4444;
   }
   .actions {
     display: flex;
     justify-content: flex-end;
     gap: 6px;
-    margin-top: 4px;
+    margin-top: 2px;
   }
   .btn {
-    font-family: var(--font-ui);
+    border-radius: var(--radius);
     font-size: 10.5px;
     padding: 3px 10px;
-    border-radius: var(--radius);
     cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .btn.primary {
+    background: var(--text-1);
+    color: var(--bg);
+  }
+  .btn.primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .btn.secondary {
     background: transparent;
+    border-color: var(--line-strong);
     color: var(--text-2);
-    border: 1px solid var(--line-strong);
   }
-  .btn.secondary:hover:not(:disabled) {
-    color: var(--text);
-    border-color: var(--text-2);
-  }
-  .btn.primary {
-    background: var(--amber);
-    color: #1a1815;
-    font-weight: 500;
-    border: 1px solid var(--amber);
-  }
-  .btn.primary:hover:not(:disabled) {
-    filter: brightness(1.1);
-  }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+  .btn.secondary:hover {
+    color: var(--text-1);
   }
 </style>

@@ -89,12 +89,17 @@ pub struct ModelSlice {
     pub tokens: i64,
     pub cost: Option<f64>,
 }
-/// 手动额度（R2-2：三列全 NULL = 未配置，卡面不显示配额条）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// 配额信息（支持手动 Token 计数与中转站 API 自动同步）
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct QuotaInfo {
-    pub total: Option<i64>,
-    pub used: Option<i64>,
+    pub quota_type: String,          // "manual" | "api"
+    pub unit: String,                // "usd" | "tokens" | "cny"
+    pub total: Option<f64>,
+    pub used: Option<f64>,
     pub reset_date: Option<String>,
+    pub updated_at: Option<i64>,
+    pub sync_status: Option<String>, // "ok" | "error" | "inactive"
+    pub sync_error: Option<String>,
 }
 
 /// 订阅档案卡片（`profile_id = null` = Unknown 虚拟卡）
@@ -501,7 +506,14 @@ fn profiles_between(
     let mut stmt = store.conn().prepare_cached(
         "SELECT r.profile_id,
                 p.display_name, p.endpoint,
-                p.quota_manual_total, p.quota_manual_used, p.quota_reset_date,
+                COALESCE(p.quota_total, p.quota_manual_total) AS quota_total,
+                COALESCE(p.quota_used, p.quota_manual_used) AS quota_used,
+                p.quota_reset_date,
+                COALESCE(p.quota_type, 'manual') AS quota_type,
+                COALESCE(p.quota_unit, CASE WHEN p.quota_manual_total IS NOT NULL THEN 'tokens' ELSE 'usd' END) AS quota_unit,
+                p.quota_updated_at,
+                p.quota_sync_status,
+                p.quota_sync_error,
                 SUM(r.input_tokens), SUM(r.output_tokens),
                 SUM(r.cache_read_tokens), SUM(r.cache_creation_tokens),
                 SUM(r.input_tokens + r.output_tokens
@@ -518,21 +530,35 @@ fn profiles_between(
             let profile_id: Option<i64> = row.get(0)?;
             let display_name: Option<String> = row.get(1)?;
             let endpoint: Option<String> = row.get(2)?;
-            let quota_total: Option<i64> = row.get(3)?;
-            let quota_used: Option<i64> = row.get(4)?;
+            let quota_total: Option<f64> = row.get(3)?;
+            let quota_used: Option<f64> = row.get(4)?;
             let quota_reset_date: Option<String> = row.get(5)?;
-            let tokens = TokenTotals::new(row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?);
-            // 三列全 NULL = 未配置（R2-2），Unknown 卡自然也是 None
-            let quota =
-                if quota_total.is_none() && quota_used.is_none() && quota_reset_date.is_none() {
-                    None
-                } else {
-                    Some(QuotaInfo {
-                        total: quota_total,
-                        used: quota_used,
-                        reset_date: quota_reset_date,
-                    })
-                };
+            let quota_type: String = row.get(6)?;
+            let quota_unit: String = row.get(7)?;
+            let quota_updated_at: Option<i64> = row.get(8)?;
+            let quota_sync_status: Option<String> = row.get(9)?;
+            let quota_sync_error: Option<String> = row.get(10)?;
+            let tokens = TokenTotals::new(row.get(11)?, row.get(12)?, row.get(13)?, row.get(14)?);
+            // 未配置：若为 manual 且 total, used, reset_date 均为 NULL，则为 None
+            let quota = if profile_id.is_none()
+                || (quota_type == "manual"
+                    && quota_total.is_none()
+                    && quota_used.is_none()
+                    && quota_reset_date.is_none())
+            {
+                None
+            } else {
+                Some(QuotaInfo {
+                    quota_type,
+                    unit: quota_unit,
+                    total: quota_total,
+                    used: quota_used,
+                    reset_date: quota_reset_date,
+                    updated_at: quota_updated_at,
+                    sync_status: quota_sync_status,
+                    sync_error: quota_sync_error,
+                })
+            };
             let cost = profile_costs.get(&profile_id).copied();
             Ok(ProfileCard {
                 profile_id,

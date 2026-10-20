@@ -13,6 +13,7 @@ import type {
   UsagePulse,
   ProxyStatus,
   HudSummary,
+  Quota,
 } from "./types";
 
 function subscribe<T>(event: string, cb: (payload: T) => void): Unsubscribe {
@@ -46,6 +47,20 @@ export function createTauriAdapter(): UiAdapter {
         resetDate: quota.reset_date,
       }),
 
+    updateProfileQuotaConfig: (profileId, config) =>
+      invoke<void>("update_profile_quota_config", {
+        profileId,
+        quotaType: config.quota_type,
+        unit: config.unit,
+        apiUrl: config.api_url ?? null,
+        apiKey: config.api_key ?? null,
+        manualTotal: config.manual_total ?? null,
+        manualUsed: config.manual_used ?? null,
+        resetDate: config.reset_date ?? null,
+      }),
+
+    syncProfileQuota: (profileId) =>
+      invoke<Quota>("sync_profile_quota", { profileId }),
     reassignUsage: (profileId, startMs, endMs) =>
       invoke<void>("reassign_usage", { profileId, startMs, endMs }),
     getProxyStatus: () => invoke<ProxyStatus>("get_proxy_status"),

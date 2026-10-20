@@ -170,13 +170,33 @@
     profileId: number,
     displayName: string,
     quota: {
+      quota_type?: string;
+      unit?: string;
+      api_url?: string | null;
+      api_key?: string | null;
       total: number | null;
       used: number | null;
       reset_date: string | null;
     },
   ) {
     await adapter.updateProfileDisplay(profileId, displayName);
-    await adapter.updateProfileQuota(profileId, quota);
+    if (quota.quota_type) {
+      await adapter.updateProfileQuotaConfig(profileId, {
+        quota_type: quota.quota_type,
+        unit: quota.unit ?? "usd",
+        api_url: quota.api_url,
+        api_key: quota.api_key,
+        manual_total: quota.total,
+        manual_used: quota.used,
+        reset_date: quota.reset_date,
+      });
+    } else {
+      await adapter.updateProfileQuota(profileId, quota);
+    }
+  }
+
+  async function handleSyncQuota(profileId: number) {
+    await adapter.syncProfileQuota(profileId);
   }
 </script>
 
@@ -241,6 +261,7 @@
     <ProfileCards
       profiles={dashboard.profiles}
       onUpdateProfile={handleUpdateProfile}
+      onSyncQuota={handleSyncQuota}
     />
     <SessionList sessions={dashboard.sessions} />
   {:else}

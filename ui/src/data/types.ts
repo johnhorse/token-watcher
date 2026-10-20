@@ -31,9 +31,14 @@ export interface ModelRow {
 }
 
 export interface Quota {
+  quota_type?: 'manual' | 'api';
+  unit?: 'usd' | 'tokens' | 'cny';
   total: number | null;
   used: number | null;
   reset_date: string | null;
+  updated_at?: number | null;
+  sync_status?: 'ok' | 'error' | 'inactive' | null;
+  sync_error?: string | null;
 }
 
 export interface ProfileCard {
@@ -108,6 +113,19 @@ export interface UiAdapter {
     profileId: number,
     quota: { total: number | null; used: number | null; reset_date: string | null },
   ): Promise<void>;
+  updateProfileQuotaConfig(
+    profileId: number,
+    config: {
+      quota_type: string;
+      unit: string;
+      api_url?: string | null;
+      api_key?: string | null;
+      manual_total?: number | null;
+      manual_used?: number | null;
+      reset_date?: string | null;
+    },
+  ): Promise<void>;
+  syncProfileQuota(profileId: number): Promise<Quota>;
   reassignUsage(
     profileId: number | null,
     startMs: number,
