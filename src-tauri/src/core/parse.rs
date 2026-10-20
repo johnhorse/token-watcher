@@ -316,6 +316,198 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
 }
+/// Codex CLI 会话文件的上下文状态（跟踪当前 session、模型、工作目录与版本）
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodexFileState {
+    pub session_id: Option<String>,
+    pub current_model: Option<String>,
+    pub cwd: Option<String>,
+    pub cli_version: Option<String>,
+    pub originator: Option<String>,
+}
+
+impl CodexFileState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// 解析 Codex CLI rollout JSONL 行
+pub fn parse_codex_line(line: &[u8], state: &mut CodexFileState) -> ParsedLine {
+    let line = trim_bytes(line);
+    if line.is_empty() {
+        return ParsedLine::Ignored;
+    }
+    let value: Value = match serde_json::from_slice(line) {
+        Ok(v) => v,
+        Err(_) => return ParsedLine::Bad,
+    };
+    let Some(obj) = value.as_object() else {
+        return ParsedLine::Bad;
+    };
+    let line_type = match obj.get("type").and_then(Value::as_str) {
+        Some(t) => t,
+        None => return ParsedLine::Bad,
+    };
+
+    match line_type {
+        "session_meta" => {
+            if let Some(payload) = obj.get("payload").and_then(Value::as_object) {
+                if let Some(sid) = payload
+                    .get("session_id")
+                    .or_else(|| payload.get("id"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    state.session_id = Some(sid.to_string());
+                }
+                if let Some(cwd) = payload
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    state.cwd = Some(cwd.to_string());
+                }
+                if let Some(ver) = payload
+                    .get("cli_version")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    state.cli_version = Some(ver.to_string());
+                }
+                if let Some(orig) = payload
+                    .get("originator")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    state.originator = Some(orig.to_string());
+                }
+            }
+            ParsedLine::Ignored
+        }
+        "turn_context" => {
+            if let Some(payload) = obj.get("payload").and_then(Value::as_object) {
+                if let Some(model) = payload
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    state.current_model = Some(model.to_string());
+                }
+                if let Some(cwd) = payload
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    state.cwd = Some(cwd.to_string());
+                }
+            }
+            ParsedLine::Ignored
+        }
+        "event_msg" => {
+            if let Some(payload) = obj.get("payload").and_then(Value::as_object) {
+                if payload.get("type").and_then(Value::as_str) == Some("thread_settings_applied") {
+                    if let Some(model) = payload
+                        .get("thread_settings")
+                        .and_then(Value::as_object)
+                        .and_then(|ts| ts.get("model"))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        state.current_model = Some(model.to_string());
+                    }
+                }
+            }
+            ParsedLine::Ignored
+        }
+        "token_usage_record" => {
+            let Some(payload) = obj.get("payload").and_then(Value::as_object) else {
+                return ParsedLine::Bad;
+            };
+            let Some(usage) = payload.get("usage").and_then(Value::as_object) else {
+                return ParsedLine::Bad;
+            };
+            let Some(timestamp_ms) = obj
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(parse_timestamp_ms)
+            else {
+                return ParsedLine::Bad;
+            };
+
+            let session_id = payload
+                .get("session_id")
+                .or_else(|| payload.get("thread_id"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or(state.session_id.as_deref());
+            let Some(session_id) = session_id else {
+                return ParsedLine::Bad;
+            };
+
+            let response_id = payload
+                .get("response_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            let record_id = if let Some(resp) = response_id {
+                format!("codex:{}:{}", session_id, resp)
+            } else {
+                let turn_id = payload
+                    .get("turn_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("noturn");
+                let ordinal = obj.get("ordinal").and_then(Value::as_i64).unwrap_or(0);
+                format!("codex:{}:{}:{}:{}", session_id, turn_id, timestamp_ms, ordinal)
+            };
+
+            let raw_input = token_value(usage.get("input_tokens"));
+            let raw_cached = token_value(usage.get("cached_input_tokens")).unwrap_or(0);
+            let raw_cache_write = token_value(usage.get("cache_write_input_tokens")).unwrap_or(0);
+            let raw_output = token_value(usage.get("output_tokens"));
+            let raw_total = token_value(usage.get("total_tokens"));
+
+            let (Some(raw_input), Some(raw_output)) = (raw_input, raw_output) else {
+                return ParsedLine::Bad;
+            };
+            if raw_input < 0 || raw_cached < 0 || raw_cache_write < 0 || raw_output < 0 {
+                return ParsedLine::Bad;
+            }
+            if raw_cached + raw_cache_write > raw_input {
+                return ParsedLine::Bad;
+            }
+            let net_input = raw_input - raw_cached - raw_cache_write;
+            if let Some(total) = raw_total {
+                if raw_input + raw_output != total {
+                    return ParsedLine::Bad;
+                }
+            }
+
+            let model = state.current_model.clone().unwrap_or_default();
+            let entrypoint = state
+                .originator
+                .clone()
+                .unwrap_or_else(|| "codex".to_string());
+            let cwd = state.cwd.clone();
+            let cc_version = state.cli_version.clone();
+
+            ParsedLine::Record(UsageRecord {
+                record_id,
+                session_id: session_id.to_string(),
+                timestamp_ms,
+                input_tokens: net_input,
+                output_tokens: raw_output,
+                cache_read_tokens: raw_cached,
+                cache_creation_tokens: raw_cache_write,
+                model,
+                entrypoint,
+                is_sidechain: false,
+                cwd,
+                cc_version,
+            })
+        }
+        _ => ParsedLine::Ignored,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -590,6 +782,154 @@ mod tests {
             "2026-10-19X10:03:45.883Z",
         ] {
             assert_eq!(parse_timestamp_ms(bad), None, "应拒绝: {bad}");
+        }
+    }
+
+    #[test]
+    fn test_codex_full_lifecycle_and_normalization() {
+        let mut state = CodexFileState::new();
+
+        let meta_line = json!({
+            "timestamp": "2026-10-20T05:15:53.324Z",
+            "ordinal": 0,
+            "type": "session_meta",
+            "payload": {
+                "session_id": "01a157bc-cb63-7ee1-a7c7-b75a46e9c9ac",
+                "cwd": "/Volumes/Data/projects/app",
+                "originator": "codex-tui",
+                "cli_version": "0.163.0"
+            }
+        }).to_string();
+        assert_eq!(parse_codex_line(meta_line.as_bytes(), &mut state), ParsedLine::Ignored);
+        assert_eq!(state.session_id.as_deref(), Some("01a157bc-cb63-7ee1-a7c7-b75a46e9c9ac"));
+        assert_eq!(state.originator.as_deref(), Some("codex-tui"));
+        assert_eq!(state.cwd.as_deref(), Some("/Volumes/Data/projects/app"));
+        assert_eq!(state.cli_version.as_deref(), Some("0.163.0"));
+
+        let turn_line = json!({
+            "timestamp": "2026-10-20T05:15:55.903Z",
+            "ordinal": 7,
+            "type": "turn_context",
+            "payload": {
+                "turn_id": "turn-1",
+                "model": "gpt-6.1-sol"
+            }
+        }).to_string();
+        assert_eq!(parse_codex_line(turn_line.as_bytes(), &mut state), ParsedLine::Ignored);
+        assert_eq!(state.current_model.as_deref(), Some("gpt-6.1-sol"));
+
+        // OpenAI 包含式：raw input = 27471, cached = 3968, cache_write = 500, out = 210, total = 27681
+        let usage_line = json!({
+            "timestamp": "2026-10-20T05:16:07.953Z",
+            "ordinal": 15,
+            "type": "token_usage_record",
+            "payload": {
+                "session_id": "01a157bc-cb63-7ee1-a7c7-b75a46e9c9ac",
+                "turn_id": "turn-1",
+                "response_id": "resp-12345",
+                "usage": {
+                    "input_tokens": 27471,
+                    "cached_input_tokens": 3968,
+                    "cache_write_input_tokens": 500,
+                    "output_tokens": 210,
+                    "total_tokens": 27681
+                }
+            }
+        }).to_string();
+
+        let parsed = parse_codex_line(usage_line.as_bytes(), &mut state);
+        match parsed {
+            ParsedLine::Record(rec) => {
+                assert_eq!(rec.record_id, "codex:01a157bc-cb63-7ee1-a7c7-b75a46e9c9ac:resp-12345");
+                assert_eq!(rec.session_id, "01a157bc-cb63-7ee1-a7c7-b75a46e9c9ac");
+                assert_eq!(rec.model, "gpt-6.1-sol");
+                assert_eq!(rec.entrypoint, "codex-tui");
+                assert_eq!(rec.input_tokens, 27471 - 3968 - 500); // 纯净输入
+                assert_eq!(rec.cache_read_tokens, 3968);
+                assert_eq!(rec.cache_creation_tokens, 500);
+                assert_eq!(rec.output_tokens, 210);
+                assert_eq!(rec.total_tokens(), 27681);
+            }
+            other => panic!("预期 Record，实际: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_codex_thread_settings_applied_switch() {
+        let mut state = CodexFileState::new();
+        let settings_line = json!({
+            "timestamp": "2026-10-20T05:15:55.903Z",
+            "ordinal": 8,
+            "type": "event_msg",
+            "payload": {
+                "type": "thread_settings_applied",
+                "thread_id": "t-1",
+                "thread_settings": {
+                    "model": "gemini-4-argon"
+                }
+            }
+        }).to_string();
+        assert_eq!(parse_codex_line(settings_line.as_bytes(), &mut state), ParsedLine::Ignored);
+        assert_eq!(state.current_model.as_deref(), Some("gemini-4-argon"));
+    }
+
+    #[test]
+    fn test_codex_cached_overflow_is_bad_line() {
+        let mut state = CodexFileState::new();
+        state.session_id = Some("s-1".into());
+        let bad_line = json!({
+            "timestamp": "2026-10-20T05:16:07.953Z",
+            "ordinal": 15,
+            "type": "token_usage_record",
+            "payload": {
+                "session_id": "s-1",
+                "response_id": "resp-1",
+                "usage": {
+                    "input_tokens": 1000,
+                    "cached_input_tokens": 1200, // 超过了 input_tokens
+                    "output_tokens": 100,
+                    "total_tokens": 1100
+                }
+            }
+        }).to_string();
+        assert_eq!(parse_codex_line(bad_line.as_bytes(), &mut state), ParsedLine::Bad);
+    }
+
+    #[test]
+    fn test_codex_fallback_record_id_without_response_id() {
+        let mut state = CodexFileState::new();
+        let line = json!({
+            "timestamp": "2026-10-20T05:16:07.953Z",
+            "ordinal": 42,
+            "type": "token_usage_record",
+            "payload": {
+                "session_id": "s-1",
+                "turn_id": "turn-9",
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 50,
+                    "total_tokens": 1050
+                }
+            }
+        }).to_string();
+        match parse_codex_line(line.as_bytes(), &mut state) {
+            ParsedLine::Record(rec) => {
+                assert!(rec.record_id.starts_with("codex:s-1:turn-9:"));
+                assert!(rec.record_id.ends_with(":42"));
+            }
+            other => panic!("预期 Record，实际: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_codex_ignored_types() {
+        let mut state = CodexFileState::new();
+        for typ in ["compacted", "event_msg", "response_item", "world_state", "task_started"] {
+            let line = json!({
+                "type": typ,
+                "payload": {}
+            }).to_string();
+            assert_eq!(parse_codex_line(line.as_bytes(), &mut state), ParsedLine::Ignored);
         }
     }
 }

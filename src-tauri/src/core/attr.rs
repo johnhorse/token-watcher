@@ -178,6 +178,56 @@ pub fn parse_settings(json_str: &str) -> SettingsSnapshot {
     }
 }
 
+/// 解析 Codex 的 config.toml，生成可归因 Profile（若配置了 custom.base_url 则为该 endpoint；若为 openai 则为 api.openai.com）
+pub fn parse_codex_config(toml_str: &str) -> SettingsSnapshot {
+    let mut model_provider = String::new();
+    let mut current_section = String::new();
+    let mut custom_base_url: Option<String> = None;
+    let mut custom_bearer_token: Option<String> = None;
+
+    for line in toml_str.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            current_section = trimmed[1..trimmed.len() - 1].trim().to_string();
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            let key = k.trim();
+            let val = v.trim().trim_matches('"').trim_matches('\'');
+            if current_section.is_empty() {
+                if key == "model_provider" {
+                    model_provider = val.to_string();
+                }
+            } else if current_section == "model_providers.custom" {
+                if key == "base_url" {
+                    custom_base_url = Some(val.to_string());
+                } else if key == "experimental_bearer_token" {
+                    custom_bearer_token = Some(val.to_string());
+                }
+            }
+        }
+    }
+
+    if model_provider == "custom" || (model_provider.is_empty() && custom_base_url.is_some()) {
+        if let Some(base_url) = custom_base_url {
+            if let Some(endpoint) = normalize_endpoint(&base_url) {
+                return SettingsSnapshot::Profile {
+                    endpoint,
+                    fingerprint: custom_bearer_token.as_deref().map(fingerprint),
+                };
+            }
+        }
+    }
+
+    SettingsSnapshot::Profile {
+        endpoint: "https://api.openai.com".to_string(),
+        fingerprint: None,
+    }
+}
+
 /// 时间线决策：把一次 settings 快照应用到时间线。
 ///
 /// - 坏 JSON：不产生任何变化；
@@ -381,6 +431,9 @@ pub fn default_display_name(endpoint: &str) -> String {
     if host == "api.anthropic.com" {
         return "Anthropic 官方".to_string();
     }
+    if host == "api.openai.com" {
+        return "OpenAI 官方".to_string();
+    }
     let bare = host.strip_prefix("api.").unwrap_or(&host);
     let first = bare.split('.').next().unwrap_or(bare);
     if let Some((_, brand)) = BRAND_DISPLAY_NAMES.iter().find(|(key, _)| *key == first) {
@@ -557,4 +610,40 @@ mod tests {
             "宽限期结束即归新档案"
         );
     }
+
+    #[test]
+    fn test_parse_codex_config_custom_and_official() {
+        let custom_toml = r#"
+model = "gpt-6.1-sol"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+experimental_bearer_token = "secret-token-123"
+"#;
+        let snap = parse_codex_config(custom_toml);
+        match snap {
+            SettingsSnapshot::Profile { endpoint, fingerprint: fp } => {
+                assert_eq!(endpoint, "http://127.0.0.1:15721");
+                assert!(fp.is_some());
+                assert_eq!(default_display_name(&endpoint), "本地代理 (15721)");
+            }
+            other => panic!("预期 Profile，实际: {:?}", other),
+        }
+
+        let official_toml = r#"
+model = "gpt-6.1-sol"
+model_provider = "openai"
+"#;
+        let snap_off = parse_codex_config(official_toml);
+        match snap_off {
+            SettingsSnapshot::Profile { endpoint, fingerprint: fp } => {
+                assert_eq!(endpoint, "https://api.openai.com");
+                assert!(fp.is_none());
+                assert_eq!(default_display_name(&endpoint), "OpenAI 官方");
+            }
+            other => panic!("预期 Profile，实际: {:?}", other),
+        }
 }
+    }

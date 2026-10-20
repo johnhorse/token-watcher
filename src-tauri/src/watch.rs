@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::core::attr::{self, ApplyOutcome, SettingsSnapshot};
-use crate::core::ingest;
+use crate::core::ingest::{self, ScanStats};
 use crate::core::store::Store;
 use crate::core::CoreError;
 use crate::tray::TrayCommand;
@@ -46,6 +46,9 @@ pub struct DataPaths {
     pub projects_root: PathBuf,
     pub settings_path: PathBuf,
     pub claude_dir: PathBuf,
+    pub codex_sessions_root: PathBuf,
+    pub codex_config_path: PathBuf,
+    pub codex_dir: PathBuf,
     pub db_path: PathBuf,
 }
 
@@ -54,10 +57,14 @@ impl DataPaths {
         let home =
             home::home_dir().ok_or_else(|| CoreError::Other("无法定位用户 home 目录".into()))?;
         let claude_dir = home.join(".claude");
+        let codex_dir = home.join(".codex");
         Ok(Self {
             projects_root: claude_dir.join("projects"),
             settings_path: claude_dir.join("settings.json"),
             claude_dir,
+            codex_sessions_root: codex_dir.join("sessions"),
+            codex_config_path: codex_dir.join("config.toml"),
+            codex_dir,
             db_path: home.join(".token-watcher").join("db.sqlite3"),
         })
     }
@@ -224,10 +231,13 @@ pub struct DataEngine<S: EventSink> {
     paths: DataPaths,
     projects_root_canonical: Option<PathBuf>,
     claude_dir_canonical: Option<PathBuf>,
+    codex_sessions_root_canonical: Option<PathBuf>,
+    codex_dir_canonical: Option<PathBuf>,
     sink: S,
     /// 由 notify 回调持有；Drop 即停止监听
     watcher: Option<RecommendedWatcher>,
     projects_watched: bool,
+    codex_sessions_watched: bool,
     store: Option<Store>,
     /// 去抖批次中待 ingest 的 JSONL 文件
     pending_files: HashSet<PathBuf>,
@@ -252,6 +262,8 @@ impl<S: EventSink> DataEngine<S> {
     pub fn new(paths: DataPaths, sink: S, tx: Sender<Message>) -> Self {
         let projects_root_canonical = fs::canonicalize(&paths.projects_root).ok();
         let claude_dir_canonical = fs::canonicalize(&paths.claude_dir).ok();
+        let codex_sessions_root_canonical = fs::canonicalize(&paths.codex_sessions_root).ok();
+        let codex_dir_canonical = fs::canonicalize(&paths.codex_dir).ok();
 
         let mut watcher =
             match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
@@ -269,6 +281,7 @@ impl<S: EventSink> DataEngine<S> {
             };
 
         let mut projects_watched = false;
+        let mut codex_sessions_watched = false;
         if let Some(w) = watcher.as_mut() {
             if paths.projects_root.exists() {
                 match w.watch(&paths.projects_root, RecursiveMode::Recursive) {
@@ -279,18 +292,27 @@ impl<S: EventSink> DataEngine<S> {
                     ),
                 }
             }
-            // ~/.claude 非递归监听始终注册：覆盖 settings.json 尚不存在、
-            // 原子写的临时文件、以及 rename 覆盖目标文件的事件路径
             if paths.claude_dir.exists() {
-                if let Err(e) = w.watch(&paths.claude_dir, RecursiveMode::NonRecursive) {
-                    eprintln!(
-                        "[token-watcher] 监听 {} 失败: {e}",
-                        paths.claude_dir.display()
-                    );
-                }
+                let _ = w.watch(&paths.claude_dir, RecursiveMode::NonRecursive);
             }
             if paths.settings_path.exists() {
                 let _ = w.watch(&paths.settings_path, RecursiveMode::NonRecursive);
+            }
+
+            if paths.codex_sessions_root.exists() {
+                match w.watch(&paths.codex_sessions_root, RecursiveMode::Recursive) {
+                    Ok(()) => codex_sessions_watched = true,
+                    Err(e) => eprintln!(
+                        "[token-watcher] 监听 {} 失败: {e}",
+                        paths.codex_sessions_root.display()
+                    ),
+                }
+            }
+            if paths.codex_dir.exists() {
+                let _ = w.watch(&paths.codex_dir, RecursiveMode::NonRecursive);
+            }
+            if paths.codex_config_path.exists() {
+                let _ = w.watch(&paths.codex_config_path, RecursiveMode::NonRecursive);
             }
         }
 
@@ -317,9 +339,12 @@ impl<S: EventSink> DataEngine<S> {
             paths,
             projects_root_canonical,
             claude_dir_canonical,
+            codex_sessions_root_canonical,
+            codex_dir_canonical,
             sink,
             watcher,
             projects_watched,
+            codex_sessions_watched,
             store,
             pending_files: HashSet::new(),
             settings_dirty: false,
@@ -348,20 +373,28 @@ impl<S: EventSink> DataEngine<S> {
             // 文件不存在 = 该时刻无归因信息
             SettingsSnapshot::NoAttribution
         };
-        if snapshot == SettingsSnapshot::Unreadable {
-            return;
-        }
-        let Some(store) = self.store.as_mut() else {
-            return;
-        };
-        let result = store.apply_settings_snapshot(&snapshot, now_ms());
-        match result {
-            Ok(_) => self.last_snapshot = Some(snapshot),
-            Err(CoreError::Db(e)) => {
-                eprintln!("[token-watcher] 启动 settings 应用失败: {e}");
-                self.enter_readonly();
+        if snapshot != SettingsSnapshot::Unreadable {
+            if let Some(store) = self.store.as_mut() {
+                let result = store.apply_settings_snapshot(&snapshot, now_ms());
+                match result {
+                    Ok(_) => self.last_snapshot = Some(snapshot),
+                    Err(CoreError::Db(e)) => {
+                        eprintln!("[token-watcher] 启动 settings 应用失败: {e}");
+                        self.enter_readonly();
+                    }
+                    Err(_) => {}
+                }
             }
-            Err(_) => {}
+        }
+
+        if self.paths.codex_config_path.exists() {
+            if let Ok(text) = fs::read_to_string(&self.paths.codex_config_path) {
+                if let SettingsSnapshot::Profile { endpoint, fingerprint } = attr::parse_codex_config(&text) {
+                    if let Some(store) = self.store.as_mut() {
+                        let _ = store.ensure_profile(&endpoint, fingerprint.as_deref());
+                    }
+                }
+            }
         }
     }
 
@@ -376,7 +409,16 @@ impl<S: EventSink> DataEngine<S> {
         }
         self.push_event("scan-progress", progress_json("scanning", 0, 0));
 
-        if !self.paths.projects_root.exists() {
+        let roots: Vec<PathBuf> = [
+            &self.paths.projects_root,
+            &self.paths.codex_sessions_root,
+        ]
+        .into_iter()
+        .filter(|p| p.exists())
+        .cloned()
+        .collect();
+
+        if roots.is_empty() {
             self.health.root_unreadable = false;
             self.push_event("scan-progress", progress_json("empty", 0, 0));
             self.emit_dirty();
@@ -391,51 +433,73 @@ impl<S: EventSink> DataEngine<S> {
         let mut hidden = false;
         let mut last_emit = Instant::now() - PROGRESS_INTERVAL;
         let mut done = 0u64;
-        let mut total = 0u64;
-        let result =
-            ingest::scan_dir_with_progress(&mut store, &self.paths.projects_root, |d, t| {
-                done = d;
-                total = t;
-                // 首个 (0,total) 与收尾 (total,total) 必发，中间按最小间隔节流
-                if d != t && last_emit.elapsed() < PROGRESS_INTERVAL {
+
+        let mut all_files = Vec::new();
+        let mut dirs_failed = 0u64;
+        let mut any_root_unreadable = false;
+        for root in &roots {
+            if let Err(e) = fs::read_dir(root) {
+                eprintln!("[token-watcher] 首扫根目录不可读 {}: {e}", root.display());
+                any_root_unreadable = true;
+                continue;
+            }
+            ingest::collect_jsonl(root, &mut all_files, &mut dirs_failed);
+        }
+        self.health.root_unreadable = any_root_unreadable;
+        all_files.sort();
+        let total = all_files.len() as u64;
+        if sink.is_visible() {
+            sink.emit_json("scan-progress", progress_json("scanning", 0, total));
+        }
+
+        let mut stats = ScanStats {
+            dirs_failed,
+            ..Default::default()
+        };
+
+        for (index, path) in all_files.into_iter().enumerate() {
+            stats.files_scanned += 1;
+            match ingest::ingest_file(&mut store, &path) {
+                Ok(file_stats) => {
+                    stats.records += file_stats.records;
+                    stats.bad_lines += file_stats.bad_lines;
+                    if file_stats.truncated {
+                        stats.truncated_files += 1;
+                    }
+                }
+                Err(e @ CoreError::Db(_)) => {
+                    eprintln!("[token-watcher] 首扫数据库错误: {e}");
+                    self.store = Some(store);
+                    self.push_event("scan-progress", progress_json("done", done, total));
+                    self.enter_readonly();
                     return;
                 }
+                Err(_) => stats.files_failed += 1,
+            }
+            done = index as u64 + 1;
+            if (done == total || last_emit.elapsed() >= PROGRESS_INTERVAL) && sink.is_visible() {
                 last_emit = Instant::now();
-                if sink.is_visible() {
-                    sink.emit_json("scan-progress", progress_json("scanning", d, t));
-                } else {
-                    hidden = true;
-                }
-            });
+                sink.emit_json("scan-progress", progress_json("scanning", done, total));
+            } else if !sink.is_visible() {
+                hidden = true;
+            }
+        }
         self.store = Some(store);
         if hidden {
             self.pending_dirty = true;
         }
 
-        match result {
-            Ok(stats) => {
-                self.health.root_unreadable = false;
-                self.health.skipped_files += stats.files_failed;
-                let phase = if total == 0 { "empty" } else { "done" };
-                self.push_event("scan-progress", progress_json(phase, done, total));
-                self.emit_dirty();
-                eprintln!(
-                    "[token-watcher] 首扫完成: files={} failed={} records={} bad_lines={} phase={phase}",
-                    stats.files_scanned, stats.files_failed, stats.records, stats.bad_lines
-                );
-            }
-            Err(CoreError::Db(e)) => {
-                eprintln!("[token-watcher] 首扫数据库错误: {e}");
-                self.push_event("scan-progress", progress_json("done", done, total));
-                self.enter_readonly();
-            }
-            Err(e) => {
-                eprintln!("[token-watcher] 首扫根目录不可读: {e}");
-                self.health.root_unreadable = true;
-                self.push_event("scan-progress", progress_json("empty", 0, 0));
-                self.emit_dirty();
-            }
+        if !any_root_unreadable {
+            self.health.root_unreadable = false;
         }
+        self.health.skipped_files += stats.files_failed;
+        let phase = if total == 0 { "empty" } else { "done" };
+        self.push_event("scan-progress", progress_json(phase, done, total));
+        self.emit_dirty();
+        eprintln!(
+            "[token-watcher] 首扫完成: files={} failed={} records={} bad_lines={} phase={phase}",
+            stats.files_scanned, stats.files_failed, stats.records, stats.bad_lines
+        );
         self.publish_health_if_changed();
     }
 
@@ -625,11 +689,18 @@ impl<S: EventSink> DataEngine<S> {
                 self.pending_files.insert(path.clone());
                 relevant = true;
             }
-            if self.is_settings_event(path) {
+            if self.is_settings_event(path) || self.is_codex_config_event(path) {
                 self.settings_dirty = true;
                 relevant = true;
             }
             if !self.projects_watched && self.is_projects_root(path) && self.try_watch_projects() {
+                self.needs_catchup = true;
+                relevant = true;
+            }
+            if !self.codex_sessions_watched
+                && self.is_codex_sessions_root(path)
+                && self.try_watch_codex_sessions()
+            {
                 self.needs_catchup = true;
                 relevant = true;
             }
@@ -649,8 +720,19 @@ impl<S: EventSink> DataEngine<S> {
         }
     }
 
+    fn under_codex(&self, path: &Path) -> bool {
+        if path.starts_with(&self.paths.codex_sessions_root) {
+            return true;
+        }
+        match (&self.codex_sessions_root_canonical, fs::canonicalize(path)) {
+            (Some(root), Ok(canonical)) => canonical.starts_with(root),
+            _ => false,
+        }
+    }
+
     fn is_jsonl_event(&self, path: &Path) -> bool {
-        path.extension().and_then(|e| e.to_str()) == Some("jsonl") && self.under_projects(path)
+        path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+            && (self.under_projects(path) || self.under_codex(path))
     }
 
     fn is_projects_root(&self, path: &Path) -> bool {
@@ -658,6 +740,16 @@ impl<S: EventSink> DataEngine<S> {
             return true;
         }
         match (&self.projects_root_canonical, fs::canonicalize(path)) {
+            (Some(root), Ok(canonical)) => canonical == *root,
+            _ => false,
+        }
+    }
+
+    fn is_codex_sessions_root(&self, path: &Path) -> bool {
+        if path == self.paths.codex_sessions_root {
+            return true;
+        }
+        match (&self.codex_sessions_root_canonical, fs::canonicalize(path)) {
             (Some(root), Ok(canonical)) => canonical == *root,
             _ => false,
         }
@@ -686,6 +778,47 @@ impl<S: EventSink> DataEngine<S> {
         }
     }
 
+    fn is_codex_config_event(&self, path: &Path) -> bool {
+        if path == self.paths.codex_config_path {
+            return true;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        if name != "config.toml" {
+            return false;
+        }
+        if path.parent() == Some(self.paths.codex_dir.as_path()) {
+            return true;
+        }
+        match (&self.codex_dir_canonical, path.parent()) {
+            (Some(root), Some(parent)) => fs::canonicalize(parent)
+                .map(|p| p == *root)
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    fn try_watch_codex_sessions(&mut self) -> bool {
+        if self.codex_sessions_watched {
+            return true;
+        }
+        let Some(watcher) = self.watcher.as_mut() else {
+            return false;
+        };
+        match watcher.watch(&self.paths.codex_sessions_root, RecursiveMode::Recursive) {
+            Ok(()) => {
+                self.codex_sessions_watched = true;
+                eprintln!("[token-watcher] 检测到 codex/sessions 目录，已开始监听");
+                true
+            }
+            Err(e) => {
+                eprintln!("[token-watcher] 补注册 codex/sessions 监听失败: {e}");
+                false
+            }
+        }
+    }
+
     fn try_watch_projects(&mut self) -> bool {
         if self.projects_watched {
             return true;
@@ -709,36 +842,40 @@ impl<S: EventSink> DataEngine<S> {
     /// 读取并应用 settings.json。瞬时可读失败/坏 JSON 一律保持上一态（契约）。
     /// 返回时间线是否发生变化。
     fn apply_settings_from_disk(&mut self) -> Result<bool, ()> {
+        let mut changed = false;
         let snapshot = match fs::read_to_string(&self.paths.settings_path) {
             Ok(text) => attr::parse_settings(&text),
-            // 原子写 rename 的空窗 / 临时不可读：保持上一态
-            Err(_) => return Ok(false),
+            Err(_) => SettingsSnapshot::NoAttribution,
         };
-        if snapshot == SettingsSnapshot::Unreadable {
-            return Ok(false);
-        }
-        if self.last_snapshot.as_ref() == Some(&snapshot) {
-            return Ok(false);
-        }
-        let Some(store) = self.store.as_mut() else {
-            return Err(());
-        };
-        let result = store.apply_settings_snapshot(&snapshot, now_ms());
-        match result {
-            Ok(outcome) => {
-                self.last_snapshot = Some(snapshot);
-                let changed = matches!(outcome, ApplyOutcome::Changed { .. });
-                if changed {
-                    eprintln!("[token-watcher] settings.json 变化，归因时间线已更新");
+        if snapshot != SettingsSnapshot::Unreadable && self.last_snapshot.as_ref() != Some(&snapshot) {
+            if let Some(store) = self.store.as_mut() {
+                match store.apply_settings_snapshot(&snapshot, now_ms()) {
+                    Ok(outcome) => {
+                        self.last_snapshot = Some(snapshot);
+                        if matches!(outcome, ApplyOutcome::Changed { .. }) {
+                            eprintln!("[token-watcher] settings.json 变化，归因时间线已更新");
+                            changed = true;
+                        }
+                    }
+                    Err(CoreError::Db(e)) => {
+                        eprintln!("[token-watcher] settings apply 数据库错误: {e}");
+                        return Err(());
+                    }
+                    Err(_) => {}
                 }
-                Ok(changed)
             }
-            Err(CoreError::Db(e)) => {
-                eprintln!("[token-watcher] settings apply 数据库错误: {e}");
-                Err(())
-            }
-            Err(_) => Ok(false),
         }
+
+        if self.paths.codex_config_path.exists() {
+            if let Ok(text) = fs::read_to_string(&self.paths.codex_config_path) {
+                if let SettingsSnapshot::Profile { endpoint, fingerprint } = attr::parse_codex_config(&text) {
+                    if let Some(store) = self.store.as_mut() {
+                        let _ = store.ensure_profile(&endpoint, fingerprint.as_deref());
+                    }
+                }
+            }
+        }
+        Ok(changed)
     }
 
     /// 静默全扫（不做进度态）：DB 恢复 / 监听根迟到 / 窗口重现时补课。
@@ -747,27 +884,40 @@ impl<S: EventSink> DataEngine<S> {
         let Some(mut store) = self.store.take() else {
             return false;
         };
-        let result = ingest::scan_dir(&mut store, &self.paths.projects_root);
-        self.store = Some(store);
-        match result {
-            Ok(stats) => {
-                self.health.root_unreadable = false;
-                self.health.skipped_files += stats.files_failed;
-                self.publish_health_if_changed();
-                stats.records > 0 || stats.truncated_files > 0
-            }
-            Err(CoreError::Db(e)) => {
-                eprintln!("[token-watcher] 补扫数据库错误: {e}");
-                self.enter_readonly();
-                false
-            }
-            Err(e) => {
-                eprintln!("[token-watcher] 补扫根目录不可读: {e}");
-                self.health.root_unreadable = true;
-                self.publish_health_if_changed();
-                false
+        let roots: Vec<PathBuf> = [
+            &self.paths.projects_root,
+            &self.paths.codex_sessions_root,
+        ]
+        .into_iter()
+        .filter(|p| p.exists())
+        .cloned()
+        .collect();
+
+        let mut changed = false;
+        for root in roots {
+            match ingest::scan_dir(&mut store, &root) {
+                Ok(stats) => {
+                    self.health.root_unreadable = false;
+                    self.health.skipped_files += stats.files_failed;
+                    if stats.records > 0 || stats.truncated_files > 0 {
+                        changed = true;
+                    }
+                }
+                Err(CoreError::Db(e)) => {
+                    eprintln!("[token-watcher] 补扫数据库错误: {e}");
+                    self.store = Some(store);
+                    self.enter_readonly();
+                    return false;
+                }
+                Err(e) => {
+                    eprintln!("[token-watcher] 补扫根目录不可读: {e}");
+                    self.health.root_unreadable = true;
+                }
             }
         }
+        self.store = Some(store);
+        self.publish_health_if_changed();
+        changed
     }
 
     fn on_window_shown(&mut self) {
@@ -786,7 +936,21 @@ impl<S: EventSink> DataEngine<S> {
             }
         }
         // 根目录之前不可读 → 趁机重试一次（不引入轮询）
-        if self.health.root_unreadable && self.paths.projects_root.exists() && self.quiet_scan() {
+        // 重新探测启动时可能未安装/不存在的目录（解决 F5 盲区）
+        if !self.projects_watched && self.paths.projects_root.exists() && self.try_watch_projects() {
+            self.needs_catchup = true;
+        }
+        if !self.codex_sessions_watched
+            && self.paths.codex_sessions_root.exists()
+            && self.try_watch_codex_sessions()
+        {
+            self.needs_catchup = true;
+        }
+
+        // 根目录之前不可读或有待补扫 → 趁机重试一次（不引入轮询）
+        let root_exists = self.paths.projects_root.exists() || self.paths.codex_sessions_root.exists();
+        if (self.health.root_unreadable || self.needs_catchup) && root_exists && self.quiet_scan() {
+            self.needs_catchup = false;
             self.emit_dirty();
         }
     }

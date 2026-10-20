@@ -47,10 +47,14 @@ impl Drop for TempDir {
 
 fn paths_for(temp: &Path) -> DataPaths {
     let claude_dir = temp.join("claude");
+    let codex_dir = temp.join("codex");
     DataPaths {
         projects_root: claude_dir.join("projects"),
         settings_path: claude_dir.join("settings.json"),
         claude_dir,
+        codex_sessions_root: codex_dir.join("sessions"),
+        codex_config_path: codex_dir.join("config.toml"),
+        codex_dir,
         db_path: temp.join("db.sqlite3"),
     }
 }

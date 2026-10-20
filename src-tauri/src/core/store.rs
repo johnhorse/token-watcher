@@ -431,6 +431,19 @@ impl Store {
     pub fn upsert_records(&mut self, records: &[UsageRecord]) -> Result<(), CoreError> {
         // 时间线很小，每批加载一次内存查询即可；避免逐条 SQL 查询
         let timeline = self.load_timeline()?;
+        let codex_profile_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM profiles
+                 WHERE endpoint LIKE '%openai.com%'
+                    OR endpoint LIKE '%15721%'
+                    OR display_name LIKE '%OpenAI%'
+                    OR display_name LIKE '%Codex%'
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
         for chunk in records.chunks(UPSERT_BATCH) {
             let tx = self.conn.transaction()?;
             {
@@ -442,8 +455,11 @@ impl Store {
                     let proxy_id: Option<i64> = proxy_stmt
                         .query_row(params![&r.record_id], |row| row.get(0))
                         .ok();
+                    let is_codex = r.record_id.starts_with("codex:");
                     let (profile_id, attr_source) = if let Some(pid) = proxy_id {
                         (Some(pid), "proxy")
+                    } else if is_codex {
+                        (codex_profile_id, "config")
                     } else {
                         (attr::attribute_at(&timeline, r.timestamp_ms), "timeline")
                     };

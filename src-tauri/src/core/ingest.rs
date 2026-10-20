@@ -19,7 +19,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use super::parse::{parse_line, ParsedLine, UsageRecord};
+use super::parse::{parse_codex_line, parse_line, CodexFileState, ParsedLine, UsageRecord};
 use super::store::{Checkpoint, Store};
 use super::CoreError;
 
@@ -45,6 +45,53 @@ pub struct ScanStats {
     pub records: u64,
     pub bad_lines: u64,
     pub truncated_files: u64,
+}
+
+/// 日志文件所属的 AI 引擎类别
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileEngineKind {
+    ClaudeCode,
+    CodexCli,
+}
+
+/// 依据文件名及内容抽样自动判定文件所属引擎
+pub fn detect_file_kind(path: &Path, sample_bytes: &[u8]) -> FileEngineKind {
+    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    if filename.starts_with("rollout-") && filename.ends_with(".jsonl") {
+        return FileEngineKind::CodexCli;
+    }
+    if sample_bytes.windows(14).any(|w| w == b"\"session_meta\"")
+        || sample_bytes.windows(20).any(|w| w == b"\"token_usage_record\"")
+    {
+        return FileEngineKind::CodexCli;
+    }
+    FileEngineKind::ClaudeCode
+}
+
+/// 极速状态重放：扫描从 0 到 up_to_offset 字节的元数据行，重建 CodexFileState
+pub fn replay_codex_state(file_path: &Path, up_to_offset: u64) -> Result<CodexFileState, CoreError> {
+    let mut state = CodexFileState::default();
+    if up_to_offset == 0 {
+        return Ok(state);
+    }
+    let mut file = fs::File::open(file_path)?;
+    let mut handle = (&mut file).take(up_to_offset);
+    let mut buf = Vec::new();
+    handle.read_to_end(&mut buf)?;
+
+    let mut line_start = 0usize;
+    for i in 0..buf.len() {
+        if buf[i] == b'\n' {
+            let line = &buf[line_start..i];
+            parse_codex_line(line, &mut state);
+            line_start = i + 1;
+        }
+    }
+    let tail = &buf[line_start..];
+    if !tail.is_empty() {
+        parse_codex_line(tail, &mut state);
+    }
+    Ok(state)
 }
 
 /// checkpoint 的键：文件规范路径（符号链接/相对路径统一成同一把钥匙）
@@ -101,12 +148,28 @@ pub fn ingest_file_with_records(
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)?;
 
+    let engine_kind = detect_file_kind(path, &buf[..buf.len().min(1024)]);
+    let mut codex_state = if engine_kind == FileEngineKind::CodexCli {
+        if offset > 0 {
+            replay_codex_state(path, offset as u64)?
+        } else {
+            CodexFileState::default()
+        }
+    } else {
+        CodexFileState::default()
+    };
+
     let mut records = Vec::new();
     let mut new_offset = offset;
     let mut line_start = 0usize;
     for i in 0..buf.len() {
         if buf[i] == b'\n' {
-            match parse_line(&buf[line_start..i]) {
+            let line = &buf[line_start..i];
+            let parsed = match engine_kind {
+                FileEngineKind::ClaudeCode => parse_line(line),
+                FileEngineKind::CodexCli => parse_codex_line(line, &mut codex_state),
+            };
+            match parsed {
                 ParsedLine::Record(record) => records.push(record),
                 ParsedLine::Bad => stats.bad_lines += 1,
                 ParsedLine::Ignored => {}
@@ -120,7 +183,11 @@ pub fn ingest_file_with_records(
     // 解析失败 → 写入进行中的不完整尾行，不计数、不推进，下次重读拼接。
     let tail = &buf[line_start..];
     if !tail.is_empty() && serde_json::from_slice::<serde_json::Value>(tail).is_ok() {
-        match parse_line(tail) {
+        let parsed = match engine_kind {
+            FileEngineKind::ClaudeCode => parse_line(tail),
+            FileEngineKind::CodexCli => parse_codex_line(tail, &mut codex_state),
+        };
+        match parsed {
             ParsedLine::Record(record) => records.push(record),
             ParsedLine::Bad => stats.bad_lines += 1,
             ParsedLine::Ignored => {}
@@ -199,7 +266,7 @@ where
     Ok(stats)
 }
 
-fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>, dirs_failed: &mut u64) {
+pub(crate) fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>, dirs_failed: &mut u64) {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => {
@@ -217,5 +284,103 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>, dirs_failed: &mut u64) {
         } else if metadata.is_file() && path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
             out.push(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_detect_file_kind() {
+        assert_eq!(
+            detect_file_kind(Path::new("rollout-2026-10-20.jsonl"), b""),
+            FileEngineKind::CodexCli
+        );
+        assert_eq!(
+            detect_file_kind(Path::new("sess-123.jsonl"), b"{\"type\":\"session_meta\"}"),
+            FileEngineKind::CodexCli
+        );
+        assert_eq!(
+            detect_file_kind(Path::new("sess-123.jsonl"), b"{\"type\":\"assistant\"}"),
+            FileEngineKind::ClaudeCode
+        );
+    }
+
+    #[test]
+    fn test_codex_incremental_replay_and_ingest() {
+        let temp_dir = tempfile_dir("codex-test");
+        let file_path = temp_dir.join("rollout-2026-10-20.jsonl");
+        let mut store = Store::open_in_memory().unwrap();
+
+        // 模拟第 1 轮写入：session_meta + turn_context(A) + usage(A)
+        {
+            let mut f = fs::File::create(&file_path).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"session_meta","payload":{{"session_id":"s-1","cwd":"/my/project","originator":"codex-tui"}}}}"#
+            ).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"turn_context","payload":{{"turn_id":"t-1","model":"gpt-6.1-sol"}}}}"#
+            ).unwrap();
+            writeln!(
+                f,
+                r#"{{"timestamp":"2026-10-20T10:00:00.000Z","type":"token_usage_record","payload":{{"session_id":"s-1","turn_id":"t-1","response_id":"resp-1","usage":{{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}}}}"#
+            ).unwrap();
+        }
+
+        // 第 1 次 ingest（从 offset 0 读起）
+        let (stats1, records1) = ingest_file_with_records(&mut store, &file_path).unwrap();
+        assert_eq!(stats1.records, 1);
+        assert_eq!(records1.len(), 1);
+        assert_eq!(records1[0].model, "gpt-6.1-sol");
+        assert_eq!(records1[0].entrypoint, "codex-tui");
+        assert_eq!(records1[0].record_id, "codex:s-1:resp-1");
+
+        // 模拟追加第 2 轮：更换模型为 gemini-4-argon，并追加 usage(B)
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&file_path).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"turn_context","payload":{{"turn_id":"t-2","model":"gemini-4-argon"}}}}"#
+            ).unwrap();
+            writeln!(
+                f,
+                r#"{{"timestamp":"2026-10-20T10:05:00.000Z","type":"token_usage_record","payload":{{"session_id":"s-1","turn_id":"t-2","response_id":"resp-2","usage":{{"input_tokens":2000,"output_tokens":200,"total_tokens":2200}}}}}}"#
+            ).unwrap();
+        }
+
+        // 第 2 次增量 ingest（从 checkpoint offset 续读，触发 replay 验证）
+        let (stats2, records2) = ingest_file_with_records(&mut store, &file_path).unwrap();
+        assert_eq!(stats2.records, 1);
+        assert_eq!(records2.len(), 1);
+        assert_eq!(records2[0].model, "gemini-4-argon");
+        assert_eq!(records2[0].record_id, "codex:s-1:resp-2");
+
+        // 模拟更细粒度切分：紧随其后追加第三条 usage(C) 在同一 turn_context 之后（断点位于 turn_context 之后）
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&file_path).unwrap();
+            writeln!(
+                f,
+                r#"{{"timestamp":"2026-10-20T10:06:00.000Z","type":"token_usage_record","payload":{{"session_id":"s-1","turn_id":"t-2","response_id":"resp-3","usage":{{"input_tokens":3000,"output_tokens":300,"total_tokens":3300}}}}}}"#
+            ).unwrap();
+        }
+
+        // 第 3 次增量续读：此时续读点刚好停在 turn_context 之后，通过 replay 重建状态，必须拿到 gemini-4-argon！
+        let (stats3, records3) = ingest_file_with_records(&mut store, &file_path).unwrap();
+        assert_eq!(stats3.records, 1);
+        assert_eq!(records3.len(), 1);
+        assert_eq!(records3[0].model, "gemini-4-argon");
+        assert_eq!(records3[0].record_id, "codex:s-1:resp-3");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    fn tempfile_dir(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("tw-test-{}-{}", name, std::process::id()));
+        let _ = fs::create_dir_all(&p);
+        p
     }
 }
