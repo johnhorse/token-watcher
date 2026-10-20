@@ -1,6 +1,6 @@
 [package]
 name = "token-watcher"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cross-platform AI token usage monitor for Claude Code — menu bar + floating widget"
 authors = ["johnhorse"]
 license = "MIT"
@@ -11,8 +11,6 @@ repository = "https://github.com/johnhorse/token-watcher"
 readme = "../README.md"
 keywords = ["claude-code", "token-usage", "tauri", "monitor", "desktop"]
 categories = ["gui", "visualization", "development-tools"]
-# 双 bin 场景下显式声明主 bin（Tauri CLI 也按此/包名识别打包目标）
-default-run = "token-watcher"
 
 # D14: 单 crate 双 bin —— GUI 主程序 + tw-ingest 开发工具，core 经显式 [lib] 共享
 [lib]
@@ -24,10 +22,6 @@ crate-type = ["rlib"]
 name = "token-watcher"
 path = "src/main.rs"
 
-# 开发/验证工具，不入安装包（bundle 只打包主 bin）
-[[bin]]
-name = "tw-ingest"
-path = "src/tw_ingest.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

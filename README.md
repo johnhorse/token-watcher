@@ -49,7 +49,7 @@ npm --prefix ui exec tauri build   # 产出安装包（构建前会自动执行 
 
 ```bash
 cd src-tauri
-cargo run --bin tw-ingest   # 全量解析 → SQLite，打印今日总量
+cargo run --example tw_ingest # 全量解析 → SQLite，打印今日总量
 cargo test                  # 单元 + fixture 集成测试
 ```
 
