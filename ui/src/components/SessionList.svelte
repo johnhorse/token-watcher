@@ -26,6 +26,11 @@
         >
           <span class="dot" class:on={session.active} aria-hidden="true"></span>
           <span class="title">{session.title}</span>
+          {#if session.engine}
+            <span class="engine-badge {session.engine}">
+              {session.engine === "codex" ? "Codex" : "Claude"}
+            </span>
+          {/if}
           {#if session.active}
             <span class="sr">{t("sessions.active")}</span>
           {/if}
@@ -85,6 +90,31 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 12.5px;
+  }
+  .engine-badge {
+    font-family: var(--font-num);
+    font-size: 8.5px;
+    line-height: 1.1;
+    padding: 1px 3.5px;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+    color: var(--text-2);
+    background: var(--bg-1);
+    letter-spacing: 0.2px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+  .engine-badge.codex {
+    color: color-mix(in srgb, #38bdf8 70%, var(--text-2));
+    border-color: color-mix(in srgb, #38bdf8 30%, var(--line));
+  }
+  .engine-badge.claude {
+    color: color-mix(in srgb, var(--accent) 70%, var(--text-2));
+    border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  }
+  .session-btn:hover .engine-badge {
+    border-color: var(--line-strong);
+    color: var(--text-1);
   }
   .total {
     font-family: var(--font-num);

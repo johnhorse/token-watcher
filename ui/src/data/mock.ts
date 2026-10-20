@@ -291,8 +291,8 @@ function buildDashboard(range: Range): Dashboard {
       Math.round(baseSessions[index] * SESSION_SCALE[range]) +
       (index === 0 ? delta : 0),
     active: index === 0,
+    engine: index === 1 ? "codex" : "claude",
   }));
-
   const now = Date.now();
   const windowPulses = pulses
     .filter((pulse) => pulse.t_ms >= now - 3_600_000)
@@ -409,8 +409,8 @@ function buildMockFlightRecorder(sessionId: string, limit?: number): SessionFlig
     title: sessionId.replace("mock-session-", "project-"),
     cwd: "/Volumes/Data/projects/token-watcher",
     cc_version: "1.0.8",
+    engine: sessionId.includes("codex") || sessionId.includes("2") ? "codex" : "claude",
     start_time_ms: startTime,
-    end_time_ms: now - 30_000,
     duration_seconds: Math.round((now - 30_000 - startTime) / 1000),
     is_active: sessionId === "mock-session-1",
     total_requests: totalTurns,

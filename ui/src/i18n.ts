@@ -81,10 +81,10 @@ const zh = {
 
   "scan.title": "首次扫描",
   "scan.detail": "{done} / {total} 文件 · {pct}%",
-  "scan.emptyTitle": "未找到 ~/.claude 数据",
-  "scan.emptyHint": "使用 Claude Code 后，用量会出现在这里。",
+  "scan.emptyTitle": "未找到本地会话数据",
+  "scan.emptyHint": "使用 Claude Code 或 Codex CLI 后，用量会出现在这里。",
 
-  "health.root": "无法读取 ~/.claude 目录 · 数据可能不完整",
+  "health.root": "无法读取数据目录 · 数据可能不完整",
   "health.skipped": "跳过 {n} 文件",
   "health.readonly": "数据库只读 · 显示已有数据，实时更新暂停",
   "health.unavailable": "数据暂时不可用 · 将在下次更新时重试",
@@ -197,10 +197,10 @@ const en: Record<MessageKey, string> = {
 
   "scan.title": "First scan",
   "scan.detail": "{done} / {total} files · {pct}%",
-  "scan.emptyTitle": "No ~/.claude data found",
-  "scan.emptyHint": "Usage appears here after you use Claude Code.",
+  "scan.emptyTitle": "No local session data found",
+  "scan.emptyHint": "Usage appears here after using Claude Code or Codex CLI.",
 
-  "health.root": "Cannot read ~/.claude · data may be incomplete",
+  "health.root": "Cannot read data directory · data may be incomplete",
   "health.skipped": "{n} files skipped",
   "health.readonly":
     "Database read-only · showing stored data, live updates paused",

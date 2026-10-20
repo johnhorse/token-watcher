@@ -1,9 +1,8 @@
 # token-watcher
 
-跨平台（macOS + Windows）AI token 实时监控桌面小组件。读取 Claude Code 本地会话数据
-（`~/.claude/projects/**/*.jsonl`），菜单栏 + 悬浮窗实时展示 token 消耗；
-多订阅/中转用户（CC Switch 等在官方 / DeepSeek / Kimi 等之间切换）可按订阅档案
-归因统计每个后端各烧了多少。
+跨平台（macOS + Windows）AI token 实时监控桌面小组件。读取 Claude Code（`~/.claude/projects/**/*.jsonl`）
+与 OpenAI Codex CLI（`~/.codex/sessions/**/rollout-*.jsonl`）本地会话数据，菜单栏 + 悬浮窗实时展示 token 消耗；
+多订阅/中转用户可按订阅档案归因统计每个后端各消耗了多少。
 
 <!-- 截图占位：macOS 菜单栏 + 悬浮窗（v0.1 发布时补） -->
 <!-- 截图占位：Windows 托盘 + 悬浮窗（v0.1 发布时补） -->
@@ -23,6 +22,19 @@
 - **隐私**：永不持久化认证 token，只存 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`
   的 SHA-256 指纹前 8 位用于区分同地址不同订阅
 - **中英文**，跟随系统语言；Meter Face 主题（暖石墨 + 琥珀信号色）
+
+## v0.3 新特性
+
+- **Flight Recorder 会话飞行记录仪**：
+  - 主看板会话平滑下钻；
+  - 逐次 API 往返吞吐脉冲谱带与实算/缓存命中对比；
+  - 突刺（Spike）科学数据驱动归因与子链（sidechain）隔离；
+  - LIVE 实时会话联动与增量自动刷新。
+- **多数据源扩展（Multi-Engine Ingestion）**：
+  - 完整并行接入 OpenAI Codex CLI 日志与 `config.toml` 配置；
+  - Fast State Replay 极速状态重放，杜绝断点续读时的空模型与脏模型；
+  - 四维互斥 Token 归一化与命名空间去重主键；
+  - 会话列表与飞行记录仪行内极简工控徽标（`[Codex]` / `[Claude]`）。
 
 ## 安装
 

@@ -1,6 +1,6 @@
 [package]
 name = "token-watcher"
-version = "0.2.1"
+version = "0.3.0"
 description = "Cross-platform AI token usage monitor for Claude Code — menu bar + floating widget"
 authors = ["johnhorse"]
 license = "MIT"

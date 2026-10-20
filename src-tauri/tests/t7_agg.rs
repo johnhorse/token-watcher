@@ -386,8 +386,9 @@ fn dashboard_serializes_to_contract_shape() {
     );
     assert_eq!(
         keys(&value["sessions"][0]),
-        ["active", "last_active_ms", "session_id", "title", "total"]
+        ["active", "engine", "last_active_ms", "session_id", "title", "total"]
     );
+    assert_eq!(value["sessions"][0]["engine"], "claude");
 
     // 入参枚举的线上表示
     assert_eq!(serde_json::to_value(Range::Week).unwrap(), "week");

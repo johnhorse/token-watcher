@@ -176,6 +176,19 @@ fn test_multi_engine_parallel_initial_scan() {
     assert_eq!(x_cr, 200);
     assert_eq!(x_cw, 50);
     assert_eq!(x_out, 80);
+    // 验证 Dashboard sessions 聚合正确标识双引擎来源
+    let store = Store::open_readonly(&paths.db_path).unwrap();
+    let dash = token_watcher_lib::core::agg::dashboard(&store, token_watcher_lib::core::agg::Range::All).unwrap();
+    let c_sess = dash.sessions.iter().find(|s| s.session_id == "sess-c1").unwrap();
+    let x_sess = dash.sessions.iter().find(|s| s.session_id == "sess-x1").unwrap();
+    assert_eq!(c_sess.engine, "claude");
+    assert_eq!(x_sess.engine, "codex");
+
+    // 验证 SessionFlightRecorder 返回准确引擎
+    let x_fr = token_watcher_lib::core::agg::session_flight_recorder(&store, None, "sess-x1", None, 20_000).unwrap().unwrap();
+    assert_eq!(x_fr.engine, "codex");
+    let c_fr = token_watcher_lib::core::agg::session_flight_recorder(&store, None, "sess-c1", None, 20_000).unwrap().unwrap();
+    assert_eq!(c_fr.engine, "claude");
 
     // 验证 scan-progress 收尾为 done
     let progress = sink.named("scan-progress");

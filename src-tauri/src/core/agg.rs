@@ -124,6 +124,8 @@ pub struct SessionRow {
     pub total: i64,
     /// 最近 [`ACTIVE_WINDOW_MS`] 内有新记录（与托盘同源定义）
     pub active: bool,
+    /// 数据源引擎（"claude" | "codex"）
+    pub engine: String,
 }
 
 /// 悬浮窗一次水合的全部数据（契约 `Dashboard`）
@@ -205,6 +207,7 @@ pub struct SessionFlightRecorder {
     pub title: String,
     pub cwd: Option<String>,
     pub cc_version: Option<String>,
+    pub engine: String,
     pub start_time_ms: i64,
     pub end_time_ms: i64,
     pub duration_seconds: i64,
@@ -660,7 +663,9 @@ fn sessions_between(
                 MAX(timestamp_ms) AS last_active_ms,
                 cwd,
                 SUM(input_tokens + output_tokens
-                    + cache_read_tokens + cache_creation_tokens) AS total
+                    + cache_read_tokens + cache_creation_tokens) AS total,
+                record_id,
+                entrypoint
          FROM usage_records
          WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2
          GROUP BY session_id
@@ -672,12 +677,17 @@ fn sessions_between(
             let session_id: String = row.get(0)?;
             let last_active_ms: i64 = row.get(1)?;
             let cwd: Option<String> = row.get(2)?;
+            let total: i64 = row.get(3)?;
+            let record_id: String = row.get(4)?;
+            let entrypoint: String = row.get(5)?;
+            let engine = detect_engine(&record_id, &entrypoint).to_string();
             Ok(SessionRow {
                 title: session_title(&session_id, cwd.as_deref()),
                 session_id,
                 last_active_ms,
-                total: row.get(3)?,
+                total,
                 active: last_active_ms >= now_ms - ACTIVE_WINDOW_MS,
+                engine,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -706,6 +716,15 @@ fn session_title(session_id: &str, cwd: Option<&str>) -> String {
         session_id.chars().take(8).collect()
     } else {
         tail.to_string()
+    }
+}
+
+/// 判断记录所属数据源引擎（`"codex"` 或 `"claude"`）
+pub fn detect_engine(record_id: &str, entrypoint: &str) -> &'static str {
+    if record_id.starts_with("codex:") || entrypoint.starts_with("codex") {
+        "codex"
+    } else {
+        "claude"
     }
 }
 
@@ -826,6 +845,11 @@ pub fn session_flight_recorder(
     let mut session_cost_sum = 0.0;
     let mut session_priced_tokens = 0i64;
     let mut session_unpriced_tokens = 0i64;
+
+    let engine = rows
+        .first()
+        .map(|r| detect_engine(&r.record_id, &r.entrypoint).to_string())
+        .unwrap_or_else(|| "claude".to_string());
 
     for (idx, r) in rows.into_iter().enumerate() {
         let row_total = r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_creation_tokens;
@@ -1035,6 +1059,7 @@ pub fn session_flight_recorder(
         title,
         cwd: last_cwd,
         cc_version: last_cc_version,
+        engine,
         start_time_ms,
         end_time_ms,
         duration_seconds,

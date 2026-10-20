@@ -59,6 +59,7 @@ export interface SessionRow {
   last_active_ms: number;
   total: number;
   active: boolean;
+  engine?: string;
 }
 
 export interface PulsePoint {
@@ -110,8 +111,8 @@ export interface SessionFlightRecorder {
   title: string;
   cwd: string | null;
   cc_version: string | null;
+  engine?: string;
   start_time_ms: number;
-  end_time_ms: number;
   duration_seconds: number;
   is_active: boolean;
   total_requests: number;

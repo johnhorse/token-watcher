@@ -114,7 +114,14 @@
   {:else}
     <!-- 会话标题与路径 -->
     <div class="session-meta">
-      <h1 class="session-title">{recorder.title}</h1>
+      <div class="session-title-row">
+        <h1 class="session-title">{recorder.title}</h1>
+        {#if recorder.engine}
+          <span class="engine-badge {recorder.engine}">
+            {recorder.engine === "codex" ? "Codex" : "Claude"}
+          </span>
+        {/if}
+      </div>
       {#if recorder.cwd}
         <div class="session-cwd" title={recorder.cwd}>{recorder.cwd}</div>
       {/if}
@@ -380,6 +387,36 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+  .session-title-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+  }
+
+  .engine-badge {
+    font-family: var(--font-num);
+    font-size: 9px;
+    line-height: 1.1;
+    padding: 1.5px 5px;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+    color: var(--text-2);
+    background: var(--bg-1);
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+
+  .engine-badge.codex {
+    color: color-mix(in srgb, #38bdf8 70%, var(--text-2));
+    border-color: color-mix(in srgb, #38bdf8 30%, var(--line));
+  }
+
+  .engine-badge.claude {
+    color: color-mix(in srgb, var(--accent) 70%, var(--text-2));
+    border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
   }
 
   .session-title {
