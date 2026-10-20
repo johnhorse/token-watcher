@@ -157,6 +157,14 @@ pub fn parse_settings(json_str: &str) -> SettingsSnapshot {
     let Some(endpoint) = normalize_endpoint(base_url) else {
         return SettingsSnapshot::NoAttribution;
     };
+    if let Some((_scheme, rest)) = endpoint.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        if let Some((host, _port)) = parse_host_port(authority) {
+            if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+                return SettingsSnapshot::NoAttribution;
+            }
+        }
+    }
     let token = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]
         .iter()
         .find_map(|key| {
@@ -329,6 +337,9 @@ fn parse_host_port(authority: &str) -> Option<(String, Option<u16>)> {
 
 /// 鉴权键指纹：SHA-256 前 8 位 hex（4 字节）。鉴权原文永不持久化。
 pub fn fingerprint(secret: &str) -> String {
+    if secret.starts_with("sk-ant-oat") {
+        return "oauth-sub".to_string();
+    }
     let digest = Sha256::digest(secret.as_bytes());
     let mut out = String::with_capacity(8);
     for byte in &digest[..4] {

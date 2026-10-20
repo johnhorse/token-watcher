@@ -16,6 +16,7 @@ pub mod app_lock;
 pub mod app_settings;
 pub mod commands;
 pub mod core;
+pub mod proxy;
 pub mod tray;
 pub mod watch;
 
@@ -38,6 +39,8 @@ pub struct AppState {
     pub store: Mutex<Option<core::store::Store>>,
     /// 只读连接的目标路径
     pub db_path: std::path::PathBuf,
+    /// 本地反向代理状态
+    pub proxy: Mutex<Option<std::sync::Arc<proxy::ProxyState>>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -97,13 +100,32 @@ pub fn run() {
                 }
             };
             let db_path = paths.db_path.clone();
+            let claude_settings_path = paths.settings_path.clone();
             let data = watch::spawn(app.handle().clone(), paths, tray_tx);
+            let proxy_state = match tauri::async_runtime::block_on(proxy::start_proxy_server(
+                data.sender(),
+                claude_settings_path,
+                proxy::DEFAULT_PORT,
+            )) {
+                Ok((st, _join)) => {
+                    eprintln!(
+                        "[token-watcher] 本地代理已在 127.0.0.1:{} 启动",
+                        st.bound_port
+                    );
+                    Some(st)
+                }
+                Err(e) => {
+                    eprintln!("[token-watcher] 本地代理启动失败: {e}");
+                    None
+                }
+            };
             app.manage(AppState {
                 _lock: Mutex::new(Some(lock)),
                 data: Mutex::new(Some(data)),
                 status: Mutex::new(ScanPublicStatus::default()),
                 store: Mutex::new(None),
                 db_path,
+                proxy: Mutex::new(proxy_state),
             });
             Ok(())
         })
@@ -129,6 +151,9 @@ pub fn run() {
             commands::update_profile_display,
             commands::update_profile_quota,
             commands::reassign_usage,
+            commands::get_proxy_status,
+            commands::inject_proxy_settings,
+            commands::restore_proxy_settings,
         ])
         .build(tauri::generate_context!());
 
@@ -136,6 +161,11 @@ pub fn run() {
         Ok(app) => app.run(|app_handle, event| {
             if matches!(event, RunEvent::Exit) {
                 if let Some(state) = app_handle.try_state::<AppState>() {
+                    if let Ok(guard) = state.proxy.lock() {
+                        if let Some(proxy_st) = guard.as_ref() {
+                            let _ = proxy::restore_settings_proxy(&proxy_st.claude_settings_path);
+                        }
+                    }
                     if let Ok(mut guard) = state.data.lock() {
                         if let Some(mut data) = guard.take() {
                             data.detach();

@@ -15,6 +15,7 @@ import type {
   TokenTotals,
   UiAdapter,
   UsagePulse,
+  ProxyStatus,
 } from "./types";
 
 const params = new URLSearchParams(window.location.search);
@@ -378,6 +379,35 @@ export function createMockAdapter(): UiAdapter {
 
     async reassignUsage() {
       // mock 无归因时间线，保留接口形状
+    },
+    async getProxyStatus() {
+      return {
+        running: true,
+        port: 4040,
+        upstream: "https://api.anthropic.com",
+        is_injected: false,
+        export_cmd: "export ANTHROPIC_BASE_URL=http://127.0.0.1:4040",
+      };
+    },
+
+    async injectProxySettings() {
+      return {
+        running: true,
+        port: 4040,
+        upstream: "https://api.anthropic.com",
+        is_injected: true,
+        export_cmd: "export ANTHROPIC_BASE_URL=http://127.0.0.1:4040",
+      };
+    },
+
+    async restoreProxySettings() {
+      return {
+        running: true,
+        port: 4040,
+        upstream: "https://api.anthropic.com",
+        is_injected: false,
+        export_cmd: "export ANTHROPIC_BASE_URL=http://127.0.0.1:4040",
+      };
     },
 
     onPulse(cb) {

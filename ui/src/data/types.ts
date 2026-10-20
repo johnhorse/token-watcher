@@ -75,6 +75,14 @@ export interface DataHealth {
   db_readonly: boolean;
 }
 
+export interface ProxyStatus {
+  running: boolean;
+  port: number;
+  upstream: string;
+  is_injected: boolean;
+  export_cmd: string;
+}
+
 export type Unsubscribe = () => void;
 
 export interface UiAdapter {
@@ -90,6 +98,9 @@ export interface UiAdapter {
     startMs: number,
     endMs: number,
   ): Promise<void>;
+  getProxyStatus(): Promise<ProxyStatus>;
+  injectProxySettings(): Promise<ProxyStatus>;
+  restoreProxySettings(): Promise<ProxyStatus>;
 
   onPulse(cb: (pulse: UsagePulse) => void): Unsubscribe;
   onScanProgress(cb: (status: ScanStatus) => void): Unsubscribe;

@@ -11,6 +11,7 @@ import type {
   UiAdapter,
   Unsubscribe,
   UsagePulse,
+  ProxyStatus,
 } from "./types";
 
 function subscribe<T>(event: string, cb: (payload: T) => void): Unsubscribe {
@@ -46,6 +47,10 @@ export function createTauriAdapter(): UiAdapter {
 
     reassignUsage: (profileId, startMs, endMs) =>
       invoke<void>("reassign_usage", { profileId, startMs, endMs }),
+    getProxyStatus: () => invoke<ProxyStatus>("get_proxy_status"),
+    injectProxySettings: () => invoke<ProxyStatus>("inject_proxy_settings"),
+    restoreProxySettings: () => invoke<ProxyStatus>("restore_proxy_settings"),
+
 
     onPulse: (cb) => subscribe<UsagePulse>("usage-pulse", cb),
     onScanProgress: (cb) => subscribe<ScanStatus>("scan-progress", cb),

@@ -38,6 +38,10 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # T5 托盘菜单 i18n：系统语言检测（zh* → 中文，其余英文）
 sys-locale = "0.3"
 home = "0.5"
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"
 
 [profile.release]
 codegen-units = 1

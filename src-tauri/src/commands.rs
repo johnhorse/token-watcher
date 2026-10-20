@@ -147,3 +147,85 @@ pub fn reassign_usage(
     emit_dirty(&app);
     Ok(())
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProxyStatusResponse {
+    pub running: bool,
+    pub port: u16,
+    pub upstream: String,
+    pub is_injected: bool,
+    pub export_cmd: String,
+}
+
+#[tauri::command]
+pub fn get_proxy_status(state: State<'_, AppState>) -> ProxyStatusResponse {
+    let guard = state.proxy.lock().ok();
+    if let Some(proxy_state) = guard.as_ref().and_then(|g| g.as_ref()) {
+        let is_injected = crate::proxy::get_injected_marker_path()
+            .map(|p| p.exists())
+            .unwrap_or(false);
+        let upstream = proxy_state.resolve_upstream(None);
+        ProxyStatusResponse {
+            running: true,
+            port: proxy_state.bound_port,
+            upstream,
+            is_injected,
+            export_cmd: format!(
+                "export ANTHROPIC_BASE_URL=http://127.0.0.1:{}",
+                proxy_state.bound_port
+            ),
+        }
+    } else {
+        ProxyStatusResponse {
+            running: false,
+            port: crate::proxy::DEFAULT_PORT,
+            upstream: "https://api.anthropic.com".into(),
+            is_injected: false,
+            export_cmd: format!(
+                "export ANTHROPIC_BASE_URL=http://127.0.0.1:{}",
+                crate::proxy::DEFAULT_PORT
+            ),
+        }
+    }
+}
+
+#[tauri::command]
+pub fn inject_proxy_settings(state: State<'_, AppState>) -> Result<ProxyStatusResponse, String> {
+    let guard = state.proxy.lock().map_err(|e| e.to_string())?;
+    let proxy_state = guard
+        .as_ref()
+        .ok_or_else(|| "代理服务尚未运行".to_string())?;
+    crate::proxy::inject_settings_proxy(proxy_state.bound_port, &proxy_state.claude_settings_path)?;
+    let upstream = proxy_state.resolve_upstream(None);
+    Ok(ProxyStatusResponse {
+        running: true,
+        port: proxy_state.bound_port,
+        upstream,
+        is_injected: true,
+        export_cmd: format!(
+            "export ANTHROPIC_BASE_URL=http://127.0.0.1:{}",
+            proxy_state.bound_port
+        ),
+    })
+}
+
+#[tauri::command]
+pub fn restore_proxy_settings(state: State<'_, AppState>) -> Result<ProxyStatusResponse, String> {
+    let guard = state.proxy.lock().map_err(|e| e.to_string())?;
+    let proxy_state = guard
+        .as_ref()
+        .ok_or_else(|| "代理服务尚未运行".to_string())?;
+    crate::proxy::restore_settings_proxy(&proxy_state.claude_settings_path)?;
+    let upstream = proxy_state.resolve_upstream(None);
+    Ok(ProxyStatusResponse {
+        running: true,
+        port: proxy_state.bound_port,
+        upstream,
+        is_injected: false,
+        export_cmd: format!(
+            "export ANTHROPIC_BASE_URL=http://127.0.0.1:{}",
+            proxy_state.bound_port
+        ),
+    })
+}

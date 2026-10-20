@@ -68,6 +68,12 @@ pub enum Message {
     Fs(Event),
     FsError(String),
     WindowShown,
+    ProxyAttribution {
+        message_id: String,
+        profile_id: Option<i64>,
+        endpoint: String,
+        fingerprint: Option<String>,
+    },
     Shutdown,
 }
 
@@ -434,7 +440,51 @@ impl<S: EventSink> DataEngine<S> {
             Message::Fs(event) => self.collect_event(event),
             Message::FsError(e) => eprintln!("[token-watcher] watcher 错误: {e}"),
             Message::WindowShown => self.on_window_shown(),
+            Message::ProxyAttribution {
+                message_id,
+                profile_id,
+                endpoint,
+                fingerprint,
+            } => self.on_proxy_attribution(message_id, profile_id, endpoint, fingerprint),
             Message::Shutdown => {}
+        }
+    }
+
+    fn on_proxy_attribution(
+        &mut self,
+        message_id: String,
+        profile_id: Option<i64>,
+        endpoint: String,
+        fingerprint: Option<String>,
+    ) {
+        let Some(store) = self.store.as_mut() else {
+            return;
+        };
+        let target_profile_id = match profile_id {
+            Some(pid) => pid,
+            None => match store.ensure_profile(&endpoint, fingerprint.as_deref()) {
+                Ok(pid) => pid,
+                Err(e) => {
+                    eprintln!("[token-watcher] 代理归因 ensure_profile 失败: {e}");
+                    return;
+                }
+            },
+        };
+        if let Err(e) =
+            store.record_proxy_attribution(&message_id, target_profile_id, Some(&endpoint))
+        {
+            eprintln!("[token-watcher] 记录代理归因失败: {e}");
+            return;
+        }
+        match store.reconcile_usage_attribution(&message_id, target_profile_id) {
+            Ok(changed) if changed > 0 => {
+                self.sink.data_changed();
+                self.emit_dirty();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[token-watcher] 代理归因晚到对账失败: {e}");
+            }
         }
     }
 
@@ -845,6 +895,10 @@ impl DataHandle {
     /// 窗口重新显示：触发一次 dashboard-dirty（契约水合语义）
     pub fn window_shown(&self) {
         let _ = self.tx.send(Message::WindowShown);
+    }
+
+    pub fn sender(&self) -> Sender<Message> {
+        self.tx.clone()
     }
 
     /// 干净退出：停 watcher、结束数据线程

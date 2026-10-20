@@ -21,7 +21,7 @@ use super::parse::UsageRecord;
 use super::CoreError;
 
 /// 当前 schema 版本。加表/改表时递增并在 migrate 里追加版本迁移分支。
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// 每条 SQL 事务提交的用量记录条数
 pub const UPSERT_BATCH: usize = 500;
@@ -90,8 +90,8 @@ const UPSERT_SQL: &str = r#"
 INSERT INTO usage_records (
     record_id, session_id, timestamp_ms, input_tokens, output_tokens,
     cache_read_tokens, cache_creation_tokens, model, entrypoint,
-    is_sidechain, cwd, cc_version, profile_id
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+    is_sidechain, cwd, cc_version, profile_id, attribution_source
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
 ON CONFLICT(record_id) DO UPDATE SET
     session_id            = excluded.session_id,
     timestamp_ms          = excluded.timestamp_ms,
@@ -104,7 +104,16 @@ ON CONFLICT(record_id) DO UPDATE SET
     is_sidechain          = excluded.is_sidechain,
     cwd                   = excluded.cwd,
     cc_version            = excluded.cc_version,
-    profile_id            = COALESCE(usage_records.profile_id, excluded.profile_id)
+    profile_id            = CASE
+        WHEN usage_records.attribution_source = 'manual' THEN usage_records.profile_id
+        WHEN excluded.attribution_source = 'proxy' THEN excluded.profile_id
+        ELSE COALESCE(usage_records.profile_id, excluded.profile_id)
+    END,
+    attribution_source    = CASE
+        WHEN usage_records.attribution_source = 'manual' THEN 'manual'
+        WHEN excluded.attribution_source = 'proxy' THEN 'proxy'
+        ELSE usage_records.attribution_source
+    END
 "#;
 
 const TOTALS_SQL: &str = r#"
@@ -192,6 +201,114 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// 确保档案存在。如果已存在 (endpoint, fingerprint) 则直接返回其 id；
+    /// 否则插入新档案并返回新分配的 id。
+    pub fn ensure_profile(
+        &mut self,
+        endpoint: &str,
+        fingerprint: Option<&str>,
+    ) -> Result<ProfileId, CoreError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM profiles
+             WHERE endpoint = ?1 AND COALESCE(credential_fingerprint, '') = COALESCE(?2, '')",
+        )?;
+        let mut rows = stmt.query(params![endpoint, fingerprint])?;
+        if let Some(row) = rows.next()? {
+            return Ok(row.get(0)?);
+        }
+        drop(rows);
+        drop(stmt);
+
+        let display_name = attr::default_display_name(endpoint);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO profiles (endpoint, credential_fingerprint, display_name, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![endpoint, fingerprint, display_name, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 记录代理嗅探到的归因映射
+    pub fn record_proxy_attribution(
+        &mut self,
+        message_id: &str,
+        profile_id: ProfileId,
+        upstream_url: Option<&str>,
+    ) -> Result<(), CoreError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO proxy_attributions (message_id, profile_id, upstream_url, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(message_id) DO UPDATE SET
+                 profile_id = excluded.profile_id,
+                 upstream_url = excluded.upstream_url",
+            params![message_id, profile_id, upstream_url, now],
+        )?;
+        Ok(())
+    }
+
+    /// 查询某条消息是否有代理精确归因记录
+    pub fn get_proxy_attribution(&self, message_id: &str) -> Result<Option<ProfileId>, CoreError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT profile_id FROM proxy_attributions WHERE message_id = ?1")?;
+        let mut rows = stmt.query(params![message_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 晚到对账：当代理归因到达后，纠正已落库但非 manual 状态的 usage_records
+    pub fn reconcile_usage_attribution(
+        &mut self,
+        message_id: &str,
+        profile_id: ProfileId,
+    ) -> Result<usize, CoreError> {
+        let changed = self.conn.execute(
+            "UPDATE usage_records
+             SET profile_id = ?2, attribution_source = 'proxy'
+             WHERE record_id = ?1 AND attribution_source != 'manual'",
+            params![message_id, profile_id],
+        )?;
+        Ok(changed)
+    }
+
+    /// 查询指定记录的归因 profile_id 与来源（'proxy' / 'timeline' / 'manual'），测试与诊断用
+    pub fn record_attribution_details(
+        &self,
+        record_id: &str,
+    ) -> Result<Option<(Option<ProfileId>, String)>, CoreError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT profile_id, attribution_source FROM usage_records WHERE record_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![record_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some((row.get(0)?, row.get(1)?))),
+            None => Ok(None),
+        }
+    }
+
+    /// 模拟用户手动修正记录归因（标记为 'manual'），测试用
+    pub fn mark_record_manual(
+        &mut self,
+        record_id: &str,
+        profile_id: Option<ProfileId>,
+    ) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE usage_records SET profile_id = ?1, attribution_source = 'manual' WHERE record_id = ?2",
+            params![profile_id, record_id],
+        )?;
+        Ok(())
+    }
+
     fn init(conn: Connection) -> Result<Self, CoreError> {
         conn.busy_timeout(Duration::from_secs(5))?;
         // WAL：读写分离，UI 读不被 ingest 写阻塞（T3 起会用到）
@@ -261,6 +378,21 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        if version < 4 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS proxy_attributions (
+                     message_id   TEXT PRIMARY KEY NOT NULL,
+                     profile_id   INTEGER NOT NULL REFERENCES profiles(id),
+                     upstream_url TEXT,
+                     created_at   INTEGER NOT NULL
+                 );
+                 ALTER TABLE usage_records ADD COLUMN attribution_source TEXT NOT NULL DEFAULT 'timeline';
+                 CREATE INDEX IF NOT EXISTS idx_usage_records_attr_source ON usage_records(attribution_source);
+                 PRAGMA user_version = 4;",
+            )?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -280,8 +412,18 @@ impl Store {
             let tx = self.conn.transaction()?;
             {
                 let mut stmt = tx.prepare_cached(UPSERT_SQL)?;
+                let mut proxy_stmt = tx.prepare_cached(
+                    "SELECT profile_id FROM proxy_attributions WHERE message_id = ?1",
+                )?;
                 for r in chunk {
-                    let profile_id = attr::attribute_at(&timeline, r.timestamp_ms);
+                    let proxy_id: Option<i64> = proxy_stmt
+                        .query_row(params![&r.record_id], |row| row.get(0))
+                        .ok();
+                    let (profile_id, attr_source) = if let Some(pid) = proxy_id {
+                        (Some(pid), "proxy")
+                    } else {
+                        (attr::attribute_at(&timeline, r.timestamp_ms), "timeline")
+                    };
                     stmt.execute(params![
                         r.record_id,
                         r.session_id,
@@ -296,6 +438,7 @@ impl Store {
                         r.cwd,
                         r.cc_version,
                         profile_id,
+                        attr_source,
                     ])?;
                 }
             }

@@ -63,6 +63,16 @@ const zh = {
   "health.skipped": "跳过 {n} 文件",
   "health.readonly": "数据库只读 · 显示已有数据，实时更新暂停",
   "health.unavailable": "数据暂时不可用 · 将在下次更新时重试",
+
+  "proxy.title": "本地代理",
+  "proxy.running": "已就绪 127.0.0.1:{port}",
+  "proxy.stopped": "未运行",
+  "proxy.upstream": "上游: {url}",
+  "proxy.copyCmd": "复制命令",
+  "proxy.copied": "已复制",
+  "proxy.inject": "接管 settings.json",
+  "proxy.restore": "还原 settings.json",
+  "proxy.injectedBadge": "已接管",
 } as const;
 
 export type MessageKey = keyof typeof zh;
@@ -128,6 +138,16 @@ const en: Record<MessageKey, string> = {
   "health.readonly":
     "Database read-only · showing stored data, live updates paused",
   "health.unavailable": "Data unavailable · will retry on next update",
+
+  "proxy.title": "Local Proxy",
+  "proxy.running": "Ready 127.0.0.1:{port}",
+  "proxy.stopped": "Stopped",
+  "proxy.upstream": "Upstream: {url}",
+  "proxy.copyCmd": "Copy",
+  "proxy.copied": "Copied",
+  "proxy.inject": "Inject into settings.json",
+  "proxy.restore": "Restore settings.json",
+  "proxy.injectedBadge": "Injected",
 };
 
 const dict: Record<Lang, Record<MessageKey, string>> = { zh, en };

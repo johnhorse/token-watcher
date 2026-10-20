@@ -20,6 +20,7 @@
   import SessionList from "./components/SessionList.svelte";
   import ScanProgress from "./components/ScanProgress.svelte";
   import ErrorBanners from "./components/ErrorBanners.svelte";
+  import ProxyBar from "./components/ProxyBar.svelte";
 
   const adapter: UiAdapter = createAdapter();
 
@@ -203,6 +204,7 @@
     <RangeChips value={range} onchange={setRange} />
     <Chart {pulses} />
     <ModelsBar models={dashboard.models} />
+    <ProxyBar {adapter} />
     <ProfileCards
       profiles={dashboard.profiles}
       onUpdateProfile={handleUpdateProfile}
