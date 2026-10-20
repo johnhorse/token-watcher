@@ -378,7 +378,7 @@ impl PriceManager {
         self: Arc<Self>,
         app: Option<tauri::AppHandle<R>>,
     ) {
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let client = match reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .user_agent("token-watcher/0.2")
