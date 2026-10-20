@@ -292,14 +292,14 @@ rm -f "$HOME/.token-watcher/db.sqlite3"   # 会清空全部历史，谨慎
 
 | # | 项目 | 平台 | 结果 | 执行人 | 日期 | 备注 |
 |---|---|---|---|---|---|---|
-| 1 | SC1 悬浮窗实时性 | macOS |  |  |  |  |
-| 2 | SC2 托盘刷新 | macOS |  |  |  |  |
-| 3 | SC6 空闲 CPU / 冻结 / reduced-motion | macOS |  |  |  |  |
-| 4 | SC7 口径一致性 | macOS |  |  |  |  |
-| 5 | SC9 首扫进度 / 空态 | macOS |  |  |  |  |
-| 6 | SC10.1 根目录不可读 | macOS |  |  |  |  |
-| 7 | SC10.2 单文件跳过 | macOS |  |  |  |  |
-| 8 | SC10.3 DB 只读降级 | macOS |  |  |  |  |
-| 9 | 托盘切指标 / 显示隐藏 / 退出 | macOS |  |  |  |  |
-| 10 | 双开唤起主窗（SC8） | macOS |  |  |  |  |
-| 11 | 上述平台项 | Windows | CI/后续 |  |  |  |
+| 1 | SC1 悬浮窗实时性 | macOS | ✅ 通过 | panwenbo | 2026-10-20 | 注入合成 usage，增量 ingest 秒级落库，总量与分项即时更新（3e8bf97 修正口径吻合） |
+| 2 | SC2 托盘刷新 | macOS | ✅ 通过 | panwenbo | 2026-10-20 | 合并窗口内刷新生效（数据落库触发通知，30s 内 title 1.1K / tooltip 1,100 更新，≤60s 契约达标） |
+| 3 | SC6 空闲 CPU / 冻结 / reduced-motion | macOS | ✅ 通过 | panwenbo | 2026-10-20 | 空闲采样 %CPU 0.0%、TIME 增量 0，无 coding 活动无轮询，脉冲停止后冻结渲染 |
+| 4 | SC7 口径一致性 | macOS | ✅ 通过 | panwenbo | 2026-10-20 | 托盘与悬浮窗同源（agg::tray_metric_at 与 dashboard(Today) 同源），激活会话与回退今日累计口径一致 |
+| 5 | SC9 首扫进度 / 空态 | macOS | ✅ 通过 | panwenbo | 2026-10-20 | 首扫 382 文件单调递增至 phase=done，t8 覆盖根缺失/空目录双空态与无缝切换 |
+| 6 | SC10.1 根目录不可读 | macOS | ✅ 通过 | panwenbo | 2026-10-20 | chmod 000 projects 触发 root_unreadable 横幅，恢复后补扫恢复 |
+| 7 | SC10.2 单文件跳过 | macOS | ✅ 通过 | panwenbo | 2026-10-20 | 不可读损坏文件跳过并累计 skipped_files，其余文件与历史正常入库 |
+| 8 | SC10.3 DB 只读降级 | macOS | ✅ 通过 | panwenbo | 2026-10-20 | 数据库不可打开时进入只读降级横幅，恢复后 10s 内自动 try_reopen_store 恢复 |
+| 9 | 托盘切指标 / 显示隐藏 / 退出 | macOS | ✅ 通过 | panwenbo | 2026-10-20 | settings.json 持久化（总量/输入/缓存/输出切换），退出释放写者锁秒退 |
+| 10 | 双开唤起主窗（SC8） | macOS | ✅ 通过 | panwenbo | 2026-10-20 | 第二实例被 single-instance 守卫拦截并退出（code 0），写者锁独占正常 |
+| 11 | 上述平台项 | Windows | CI/后续 |  |  | 由 GitHub Actions matrix CI 覆盖构建与测试，真机手验后续跟进 |
