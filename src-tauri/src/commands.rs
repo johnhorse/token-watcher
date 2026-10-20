@@ -4,7 +4,7 @@
 //! 手动修正）在首扫完成后才放行，低频、SQLite 层串行化，写完发
 //! `dashboard-dirty` 让 UI 防抖重拉。
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::core::agg::{self, Dashboard, Range, TokenTotals};
 use crate::core::store::Store;
@@ -228,4 +228,69 @@ pub fn restore_proxy_settings(state: State<'_, AppState>) -> Result<ProxyStatusR
             proxy_state.bound_port
         ),
     })
+}
+
+#[tauri::command]
+pub fn get_hud_summary(state: State<'_, AppState>) -> Result<crate::core::agg::HudSummary, String> {
+    let settings_path = crate::app_settings::path_for_db(&state.db_path);
+    let settings = crate::app_settings::AppSettings::load(&settings_path);
+    let mut guard = state.store.lock().map_err(|e| e.to_string())?;
+    if guard.is_none() {
+        let store = Store::open_readonly(&state.db_path).map_err(|e| e.to_string())?;
+        *guard = Some(store);
+    }
+    let store = guard.as_ref().expect("上面刚放入");
+    crate::core::agg::hud_summary(store, settings.hud_locked).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_hud_visible(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    visible: bool,
+) -> Result<(), String> {
+    let settings_path = crate::app_settings::path_for_db(&state.db_path);
+    let mut settings = crate::app_settings::AppSettings::load(&settings_path);
+    settings.hud_visible = visible;
+    settings.save(&settings_path).map_err(|e| e.to_string())?;
+    crate::hud::ensure_hud_window(
+        &app,
+        visible,
+        settings.hud_locked,
+        settings.hud_x,
+        settings.hud_y,
+    )?;
+    crate::tray::sync_hud_menu_items(&app, &settings);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_hud_locked(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    locked: bool,
+) -> Result<(), String> {
+    let settings_path = crate::app_settings::path_for_db(&state.db_path);
+    let mut settings = crate::app_settings::AppSettings::load(&settings_path);
+    settings.hud_locked = locked;
+    settings.save(&settings_path).map_err(|e| e.to_string())?;
+    if let Some(win) = app.get_webview_window(crate::hud::HUD_LABEL) {
+        crate::hud::apply_hud_locked(&win, locked)?;
+    }
+    crate::tray::sync_hud_menu_items(&app, &settings);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn save_hud_position(state: State<'_, AppState>, x: i32, y: i32) -> Result<(), String> {
+    let settings_path = crate::app_settings::path_for_db(&state.db_path);
+    let mut settings = crate::app_settings::AppSettings::load(&settings_path);
+    settings.hud_x = Some(x);
+    settings.hud_y = Some(y);
+    settings.save(&settings_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn show_main_window(app: AppHandle) -> Result<(), String> {
+    crate::hud::show_main_window(&app)
 }

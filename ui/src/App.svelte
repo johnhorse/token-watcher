@@ -78,7 +78,13 @@
     }
   }
 
+  let hasPendingLoad = false;
+
   function scheduleLoad(): void {
+    if (typeof document !== "undefined" && document.hidden) {
+      hasPendingLoad = true;
+      return;
+    }
     if (dirtyTimer) clearTimeout(dirtyTimer);
     dirtyTimer = setTimeout(() => {
       dirtyTimer = undefined;
@@ -113,12 +119,16 @@
       health = next;
     });
 
-    const onVisibility = () => {
-      const visible = document.visibilityState === "visible";
+    const onFocusOrVisible = () => {
+      const visible = !document.hidden;
       adapter.setVisible(visible);
-      if (visible) void loadNow(); // 重新显示：全量水合一次，再续接增量推送
+      if (visible) {
+        hasPendingLoad = false;
+        void loadNow(); // 重新显示或聚焦：全量水合一次，再续接增量推送
+      }
     };
-    document.addEventListener("visibilitychange", onVisibility);
+    document.addEventListener("visibilitychange", onFocusOrVisible);
+    window.addEventListener("focus", onFocusOrVisible);
 
     void (async () => {
       try {
@@ -148,7 +158,8 @@
       offDirty();
       offScan();
       offHealth();
-      document.removeEventListener("visibilitychange", onVisibility);
+      document.removeEventListener("visibilitychange", onFocusOrVisible);
+      window.removeEventListener("focus", onFocusOrVisible);
       if (dirtyTimer) clearTimeout(dirtyTimer);
     };
   });

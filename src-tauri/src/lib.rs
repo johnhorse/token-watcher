@@ -16,6 +16,7 @@ pub mod app_lock;
 pub mod app_settings;
 pub mod commands;
 pub mod core;
+pub mod hud;
 pub mod proxy;
 pub mod tray;
 pub mod watch;
@@ -87,12 +88,8 @@ pub fn run() {
             // 托盘失败不阻塞数据管道：用断开通道降级，窗口仍可用。
             let settings_path = app_settings::path_for_db(&paths.db_path);
             let settings = AppSettings::load(&settings_path);
-            let tray_tx = match tray::setup(
-                app.handle(),
-                &settings_path,
-                &paths.db_path,
-                settings.tray_metric,
-            ) {
+            let tray_tx = match tray::setup(app.handle(), &settings_path, &paths.db_path, &settings)
+            {
                 Ok(tx) => tx,
                 Err(e) => {
                     eprintln!("[token-watcher] 托盘初始化失败: {e}");
@@ -119,6 +116,17 @@ pub fn run() {
                     None
                 }
             };
+            if settings.hud_visible {
+                if let Err(e) = hud::ensure_hud_window(
+                    app.handle(),
+                    true,
+                    settings.hud_locked,
+                    settings.hud_x,
+                    settings.hud_y,
+                ) {
+                    eprintln!("[token-watcher] HUD 窗口恢复失败: {e}");
+                }
+            }
             app.manage(AppState {
                 _lock: Mutex::new(Some(lock)),
                 data: Mutex::new(Some(data)),
@@ -129,12 +137,9 @@ pub fn run() {
             });
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // Tauri 2 没有 visibility 事件：用获得焦点作为「重新显示」信号。
-            // 隐藏时的 emit 挂起由数据线程按 is_visible() 自行判断。
-            if matches!(event, WindowEvent::Focused(true)) {
+        .on_window_event(|window, event| match event {
+            WindowEvent::Focused(true) => {
                 let app_handle = window.app_handle();
-                // T5：窗口可能被 single-instance 等菜单外路径显示 → 同步菜单文案
                 tray::sync_window_item_label(app_handle);
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     if let Ok(guard) = state.data.lock() {
@@ -144,6 +149,12 @@ pub fn run() {
                     }
                 }
             }
+            WindowEvent::CloseRequested { api, .. } if window.label() == watch::WINDOW_LABEL => {
+                api.prevent_close();
+                let _ = window.hide();
+                tray::sync_window_item_label(window.app_handle());
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_dashboard,
@@ -154,6 +165,11 @@ pub fn run() {
             commands::get_proxy_status,
             commands::inject_proxy_settings,
             commands::restore_proxy_settings,
+            commands::get_hud_summary,
+            commands::set_hud_visible,
+            commands::set_hud_locked,
+            commands::save_hud_position,
+            commands::show_main_window
         ])
         .build(tauri::generate_context!());
 

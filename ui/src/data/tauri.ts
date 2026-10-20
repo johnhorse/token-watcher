@@ -12,6 +12,7 @@ import type {
   Unsubscribe,
   UsagePulse,
   ProxyStatus,
+  HudSummary,
 } from "./types";
 
 function subscribe<T>(event: string, cb: (payload: T) => void): Unsubscribe {
@@ -50,6 +51,11 @@ export function createTauriAdapter(): UiAdapter {
     getProxyStatus: () => invoke<ProxyStatus>("get_proxy_status"),
     injectProxySettings: () => invoke<ProxyStatus>("inject_proxy_settings"),
     restoreProxySettings: () => invoke<ProxyStatus>("restore_proxy_settings"),
+    getHudSummary: () => invoke<HudSummary>("get_hud_summary"),
+    setHudVisible: (visible) => invoke<void>("set_hud_visible", { visible }),
+    setHudLocked: (locked) => invoke<void>("set_hud_locked", { locked }),
+    saveHudPosition: (x, y) => invoke<void>("save_hud_position", { x, y }),
+    showMainWindow: () => invoke<void>("show_main_window"),
 
 
     onPulse: (cb) => subscribe<UsagePulse>("usage-pulse", cb),

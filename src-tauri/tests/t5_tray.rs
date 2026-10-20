@@ -119,6 +119,7 @@ fn settings_roundtrip_shape_and_missing_file() {
 
     let custom = AppSettings {
         tray_metric: TrayMetric::CacheRead,
+        ..Default::default()
     };
     custom.save(&path).unwrap();
     let value: serde_json::Value =

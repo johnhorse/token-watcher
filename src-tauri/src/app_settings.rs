@@ -20,12 +20,24 @@ pub const FILE_NAME: &str = "settings.json";
 pub struct AppSettings {
     /// 托盘显示指标（四选一，默认总 Token）
     pub tray_metric: TrayMetric,
+    /// 桌面角落 HUD 是否开启（默认 false）
+    pub hud_visible: bool,
+    /// 桌面角落 HUD 是否锁定并穿透鼠标（默认 false）
+    pub hud_locked: bool,
+    /// 桌面角落 HUD 记忆 X 坐标（逻辑像素，None 表示未保存或使用默认）
+    pub hud_x: Option<i32>,
+    /// 桌面角落 HUD 记忆 Y 坐标（逻辑像素，None 表示未保存或使用默认）
+    pub hud_y: Option<i32>,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             tray_metric: TrayMetric::Total,
+            hud_visible: false,
+            hud_locked: false,
+            hud_x: None,
+            hud_y: None,
         }
     }
 }

@@ -133,6 +133,17 @@ pub struct Dashboard {
     pub sessions: Vec<SessionRow>,
 }
 
+/// 桌面角落 HUD 紧凑概览数据（< 1ms 轻量查询）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct HudSummary {
+    /// 今日累计总 Token
+    pub total_today: i64,
+    /// 最近 5 分钟平均燃烧速率（tokens/min）
+    pub rate_per_min: i64,
+    /// 鼠标穿透锁定状态
+    pub hud_locked: bool,
+}
+
 /// 当前 Unix epoch 毫秒
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -202,6 +213,30 @@ pub fn tray_metric_at(store: &Store, metric: TrayMetric, now_ms: i64) -> Result<
         )?,
     };
     Ok(value)
+}
+
+/// HUD 紧凑数据（使用系统当前时间）
+pub fn hud_summary(store: &Store, hud_locked: bool) -> Result<HudSummary, CoreError> {
+    hud_summary_at(store, hud_locked, now_ms())
+}
+
+/// HUD 紧凑数据（纯函数，指定时间点便于测试）
+pub fn hud_summary_at(
+    store: &Store,
+    hud_locked: bool,
+    now_ms: i64,
+) -> Result<HudSummary, CoreError> {
+    let today = local_date_at(store, now_ms)?;
+    let (start_ms, end_ms) = store.local_day_bounds(&today)?;
+    let total_today = token_totals(store.totals_between(start_ms, end_ms)?).total;
+    let five_min_ago = now_ms - ACTIVE_WINDOW_MS;
+    let sum_5m = token_totals(store.totals_between(five_min_ago, now_ms + 1)?).total;
+    let rate_per_min = (sum_5m / 5).max(0);
+    Ok(HudSummary {
+        total_today,
+        rate_per_min,
+        hud_locked,
+    })
 }
 
 // ---------------------------------------------------------------------------

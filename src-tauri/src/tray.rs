@@ -38,6 +38,8 @@ const ID_CACHE_READ: &str = "metric-cache-read";
 const ID_OUTPUT: &str = "metric-output";
 const ID_TOGGLE_WINDOW: &str = "toggle-window";
 const ID_QUIT: &str = "quit";
+const ID_HUD_VISIBLE: &str = "hud-visible";
+const ID_HUD_LOCKED: &str = "hud-locked";
 
 /// 托盘线程命令：数据变化来自数据线程，指标切换来自菜单
 pub enum TrayCommand {
@@ -102,6 +104,20 @@ impl Lang {
         match self {
             Lang::Zh => "隐藏悬浮窗",
             Lang::En => "Hide Window",
+        }
+    }
+
+    pub fn hud_visible(self) -> &'static str {
+        match self {
+            Lang::Zh => "显示桌面 HUD",
+            Lang::En => "Show Desktop HUD",
+        }
+    }
+
+    pub fn hud_locked(self) -> &'static str {
+        match self {
+            Lang::Zh => "锁定 HUD (鼠标穿透)",
+            Lang::En => "Lock HUD (Click-Through)",
         }
     }
 
@@ -187,6 +203,8 @@ fn metric_from_id(id: &str) -> Option<TrayMetric> {
 /// setup 时保存的菜单项句柄与语言：供 `WindowEvent::Focused` 等外部路径
 /// （如 single-instance 唤起窗口）同步「显示/隐藏悬浮窗」文案。
 static WINDOW_ITEM: OnceLock<MenuItem<Wry>> = OnceLock::new();
+static HUD_VISIBLE_ITEM: OnceLock<CheckMenuItem<Wry>> = OnceLock::new();
+static HUD_LOCKED_ITEM: OnceLock<CheckMenuItem<Wry>> = OnceLock::new();
 static LANG: OnceLock<Lang> = OnceLock::new();
 
 /// 托盘初始化：复用 tauri.conf.json 创建的图标，挂菜单 / 事件 / 刷新线程。
@@ -196,7 +214,7 @@ pub fn setup(
     app: &AppHandle,
     settings_path: &Path,
     db_path: &Path,
-    initial_metric: TrayMetric,
+    initial_settings: &AppSettings,
 ) -> tauri::Result<Sender<TrayCommand>> {
     let tray = app.tray_by_id(TRAY_ID).ok_or_else(|| {
         tauri::Error::AssetNotFound(format!(
@@ -205,7 +223,23 @@ pub fn setup(
     })?;
 
     let lang = detect_lang();
-    let metric_items = build_metric_items(app, initial_metric, lang)?;
+    let metric_items = build_metric_items(app, initial_settings.tray_metric, lang)?;
+    let hud_visible_item = CheckMenuItem::with_id(
+        app,
+        ID_HUD_VISIBLE,
+        lang.hud_visible(),
+        true,
+        initial_settings.hud_visible,
+        None::<&str>,
+    )?;
+    let hud_locked_item = CheckMenuItem::with_id(
+        app,
+        ID_HUD_LOCKED,
+        lang.hud_locked(),
+        initial_settings.hud_visible,
+        initial_settings.hud_locked,
+        None::<&str>,
+    )?;
     let window_visible = app
         .get_webview_window(WINDOW_LABEL)
         .and_then(|w| w.is_visible().ok())
@@ -219,16 +253,23 @@ pub fn setup(
     let quit = MenuItem::with_id(app, ID_QUIT, lang.quit(), true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
+    let sep3 = PredefinedMenuItem::separator(app)?;
 
     let mut items: Vec<&dyn IsMenuItem<Wry>> = metric_items
         .iter()
         .map(|(_, item)| item as &dyn IsMenuItem<Wry>)
         .collect();
     items.push(&sep1);
-    items.push(&toggle);
+    items.push(&hud_visible_item);
+    items.push(&hud_locked_item);
     items.push(&sep2);
+    items.push(&toggle);
+    items.push(&sep3);
     items.push(&quit);
     tray.set_menu(Some(Menu::with_items(app, &items)?))?;
+
+    let _ = HUD_VISIBLE_ITEM.set(hud_visible_item);
+    let _ = HUD_LOCKED_ITEM.set(hud_locked_item);
 
     // 文案同步用的全局句柄（set 失败只可能是重复初始化，忽略）
     let _ = WINDOW_ITEM.set(toggle);
@@ -261,14 +302,32 @@ pub fn setup(
         let id = event.id().as_ref();
         if let Some(metric) = metric_from_id(id) {
             set_checked(&menu_items, metric);
-            if let Err(e) = (AppSettings {
-                tray_metric: metric,
-            })
-            .save(&settings_path)
-            {
+            let mut settings = AppSettings::load(&settings_path);
+            settings.tray_metric = metric;
+            if let Err(e) = settings.save(&settings_path) {
                 eprintln!("[token-watcher] 保存托盘指标设置失败: {e}");
             }
             let _ = menu_tx.send(TrayCommand::MetricChanged(metric));
+        } else if id == ID_HUD_VISIBLE {
+            let mut settings = AppSettings::load(&settings_path);
+            settings.hud_visible = !settings.hud_visible;
+            let _ = settings.save(&settings_path);
+            let _ = crate::hud::ensure_hud_window(
+                app,
+                settings.hud_visible,
+                settings.hud_locked,
+                settings.hud_x,
+                settings.hud_y,
+            );
+            sync_hud_menu_items(app, &settings);
+        } else if id == ID_HUD_LOCKED {
+            let mut settings = AppSettings::load(&settings_path);
+            settings.hud_locked = !settings.hud_locked;
+            let _ = settings.save(&settings_path);
+            if let Some(win) = app.get_webview_window(crate::hud::HUD_LABEL) {
+                let _ = crate::hud::apply_hud_locked(&win, settings.hud_locked);
+            }
+            sync_hud_menu_items(app, &settings);
         } else if id == ID_TOGGLE_WINDOW {
             toggle_main_window(app);
         } else if id == ID_QUIT {
@@ -276,7 +335,13 @@ pub fn setup(
         }
     });
 
-    spawn_refresher(tray, db_path.to_path_buf(), initial_metric, lang, rx);
+    spawn_refresher(
+        tray,
+        db_path.to_path_buf(),
+        initial_settings.tray_metric,
+        lang,
+        rx,
+    );
     Ok(tx)
 }
 
@@ -352,6 +417,17 @@ pub fn sync_window_item_label(app: &AppHandle) {
         lang.show_window()
     };
     let _ = item.set_text(text);
+}
+
+/// 同步 HUD 菜单项勾选与可用状态
+pub fn sync_hud_menu_items(_app: &AppHandle, settings: &AppSettings) {
+    if let Some(item) = HUD_VISIBLE_ITEM.get() {
+        let _ = item.set_checked(settings.hud_visible);
+    }
+    if let Some(item) = HUD_LOCKED_ITEM.get() {
+        let _ = item.set_checked(settings.hud_locked);
+        let _ = item.set_enabled(settings.hud_visible);
+    }
 }
 
 /// 托盘刷新线程：数据变化通知 + 60s 兜底；合并窗口内不重复查库。

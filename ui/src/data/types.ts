@@ -83,6 +83,12 @@ export interface ProxyStatus {
   export_cmd: string;
 }
 
+export interface HudSummary {
+  total_today: number;
+  rate_per_min: number;
+  hud_locked: boolean;
+}
+
 export type Unsubscribe = () => void;
 
 export interface UiAdapter {
@@ -101,6 +107,11 @@ export interface UiAdapter {
   getProxyStatus(): Promise<ProxyStatus>;
   injectProxySettings(): Promise<ProxyStatus>;
   restoreProxySettings(): Promise<ProxyStatus>;
+  getHudSummary(): Promise<HudSummary>;
+  setHudVisible(visible: boolean): Promise<void>;
+  setHudLocked(locked: boolean): Promise<void>;
+  saveHudPosition(x: number, y: number): Promise<void>;
+  showMainWindow(): Promise<void>;
 
   onPulse(cb: (pulse: UsagePulse) => void): Unsubscribe;
   onScanProgress(cb: (status: ScanStatus) => void): Unsubscribe;

@@ -409,6 +409,17 @@ export function createMockAdapter(): UiAdapter {
         export_cmd: "export ANTHROPIC_BASE_URL=http://127.0.0.1:4040",
       };
     },
+    async getHudSummary() {
+      return {
+        total_today: 359420 + liveTotal(),
+        rate_per_min: 14200,
+        hud_locked: false,
+      };
+    },
+    async setHudVisible() {},
+    async setHudLocked() {},
+    async saveHudPosition() {},
+    async showMainWindow() {},
 
     onPulse(cb) {
       pulseSubs.add(cb);

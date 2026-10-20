@@ -95,10 +95,14 @@ struct TauriSink {
 
 impl EventSink for TauriSink {
     fn is_visible(&self) -> bool {
-        self.app
-            .get_webview_window(WINDOW_LABEL)
-            .and_then(|w| w.is_visible().ok())
-            .unwrap_or(true)
+        let main_win = self.app.get_webview_window(WINDOW_LABEL);
+        let hud_win = self.app.get_webview_window(crate::hud::HUD_LABEL);
+        if main_win.is_none() && hud_win.is_none() {
+            return true;
+        }
+        let main_visible = main_win.and_then(|w| w.is_visible().ok()).unwrap_or(false);
+        let hud_visible = hud_win.and_then(|w| w.is_visible().ok()).unwrap_or(false);
+        main_visible || hud_visible
     }
 
     fn emit_json(&self, event: &str, payload: Value) {
