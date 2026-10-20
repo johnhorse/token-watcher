@@ -204,7 +204,7 @@ pub fn create_router(state: Arc<ProxyState>) -> Router {
 async fn health_handler(State(state): State<Arc<ProxyState>>) -> impl IntoResponse {
     let payload = serde_json::json!({
         "status": "ok",
-        "version": "0.2.0",
+        "version": "0.2.1",
         "port": state.bound_port,
     });
     (
