@@ -352,16 +352,21 @@ fn dashboard_serializes_to_contract_shape() {
     assert_eq!(value["range"], "today");
     assert_eq!(
         keys(&value),
-        ["models", "profiles", "pulses", "range", "sessions", "totals"]
+        ["cost", "models", "profiles", "pulses", "range", "sessions", "totals"]
     );
     assert_eq!(
         keys(&value["totals"]),
         ["cache_creation", "cache_read", "input", "output", "total"]
     );
-    assert_eq!(keys(&value["models"][0]), ["model", "tokens"]);
+    assert_eq!(
+        keys(&value["cost"]),
+        ["coverage", "is_complete", "total", "unpriced_tokens"]
+    );
+    assert_eq!(keys(&value["models"][0]), ["cost", "model", "tokens"]);
     assert_eq!(
         keys(&value["profiles"][0]),
         [
+            "cost",
             "display_name",
             "endpoint",
             "inferred",

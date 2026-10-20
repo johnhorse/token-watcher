@@ -11,7 +11,7 @@
     type UsagePulse,
   } from "./data";
   import { t, type MessageKey } from "./i18n";
-  import { formatCompact } from "./format";
+  import { formatCompact, formatCost, formatCostPrecise } from "./format";
   import Digits from "./components/Digits.svelte";
   import RangeChips from "./components/RangeChips.svelte";
   import Chart from "./components/Chart.svelte";
@@ -105,6 +105,7 @@
   onMount(() => {
     const offPulse = adapter.onPulse((pulse) => mergePulses([pulse]));
     const offDirty = adapter.onDashboardDirty(scheduleLoad);
+    const offPricing = adapter.onPricingUpdated?.(scheduleLoad);
     const offScan = adapter.onScanProgress((status) => {
       scan = status;
       if (status.phase === "scanning") {
@@ -156,6 +157,7 @@
     return () => {
       offPulse();
       offDirty();
+      offPricing?.();
       offScan();
       offHealth();
       document.removeEventListener("visibilitychange", onFocusOrVisible);
@@ -185,11 +187,31 @@
     <section class="totals">
       <div class="label-row">
         <span class="label">{totalLabel}</span>
-        {#if health.skipped_files > 0}
-          <span class="badge"
-            >{t("health.skipped", { n: health.skipped_files })}</span
-          >
-        {/if}
+        <div class="header-tags">
+          {#if dashboard.cost}
+            <span
+              class="cost-badge"
+              title={`${t("cost.estimateTooltip")} · ${formatCostPrecise(dashboard.cost.total)}`}
+            >
+              <span class="cost-pattern hatch" aria-hidden="true"></span>
+              <span class="cost-label">{t("cost.estimated")}</span>
+              <span class="cost-value">{formatCost(dashboard.cost.total)}</span>
+              {#if !dashboard.cost.is_complete}
+                <span
+                  class="unpriced-mark"
+                  title={t("cost.unpricedNote", {
+                    n: formatCompact(dashboard.cost.unpriced_tokens),
+                  })}>*</span
+                >
+              {/if}
+            </span>
+          {/if}
+          {#if health.skipped_files > 0}
+            <span class="badge"
+              >{t("health.skipped", { n: health.skipped_files })}</span
+            >
+          {/if}
+        </div>
       </div>
       <div class="big"><Digits value={dashboard.totals.total} /></div>
       <div class="breakdown">
@@ -246,6 +268,50 @@
     font-size: 11px;
     color: var(--text-2);
     letter-spacing: 0.03em;
+  }
+  .header-tags {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .cost-badge {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    font-family: var(--font-num);
+    font-size: 10px;
+    color: var(--text-2);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    overflow: hidden;
+    cursor: default;
+  }
+  .cost-pattern {
+    position: absolute;
+    inset: 0;
+    opacity: 0.18;
+    pointer-events: none;
+  }
+  .cost-label {
+    font-size: 9px;
+    opacity: 0.8;
+    position: relative;
+    z-index: 1;
+  }
+  .cost-value {
+    font-weight: 500;
+    color: var(--text-1);
+    font-variant-numeric: tabular-nums;
+    position: relative;
+    z-index: 1;
+  }
+  .unpriced-mark {
+    color: var(--accent);
+    font-weight: bold;
+    position: relative;
+    z-index: 1;
   }
   .badge {
     font-family: var(--font-num);

@@ -42,6 +42,8 @@ pub struct AppState {
     pub db_path: std::path::PathBuf,
     /// 本地反向代理状态
     pub proxy: Mutex<Option<std::sync::Arc<proxy::ProxyState>>>,
+    /// 成本估算价格表管理器
+    pub pricing: std::sync::Arc<core::pricing::PriceManager>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -127,6 +129,9 @@ pub fn run() {
                     eprintln!("[token-watcher] HUD 窗口恢复失败: {e}");
                 }
             }
+            let data_dir = db_path.parent().unwrap_or(std::path::Path::new("."));
+            let pricing = std::sync::Arc::new(core::pricing::PriceManager::new(data_dir));
+            pricing.clone().spawn_background_refresher(Some(app.handle().clone()));
             app.manage(AppState {
                 _lock: Mutex::new(Some(lock)),
                 data: Mutex::new(Some(data)),
@@ -134,6 +139,7 @@ pub fn run() {
                 store: Mutex::new(None),
                 db_path,
                 proxy: Mutex::new(proxy_state),
+                pricing,
             });
             Ok(())
         })

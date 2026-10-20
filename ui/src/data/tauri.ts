@@ -62,6 +62,7 @@ export function createTauriAdapter(): UiAdapter {
     onScanProgress: (cb) => subscribe<ScanStatus>("scan-progress", cb),
     onDataHealth: (cb) => subscribe<DataHealth>("data-health", cb),
     onDashboardDirty: (cb) => subscribe<null>("dashboard-dirty", () => cb()),
+    onPricingUpdated: (cb) => subscribe<void>("pricing-updated", () => cb()),
 
     setVisible() {
       // Rust 侧监听窗口可见性并自行暂停/恢复 emit（契约未定义对应 command）。

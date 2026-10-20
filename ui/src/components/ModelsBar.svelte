@@ -1,6 +1,6 @@
 <script lang="ts">
   // T6 —— 模型分布横条（实心 = 实测；无象形图标，只有发丝线/进度条）。
-  import { formatCompact } from "../format";
+  import { formatCompact, formatCost, formatCostPrecise } from "../format";
   import { t } from "../i18n";
   import type { ModelRow } from "../data";
 
@@ -16,7 +16,14 @@
       <li>
         <div class="row">
           <span class="name" title={row.model}>{row.model}</span>
-          <span class="value">{formatCompact(row.tokens)}</span>
+          <div class="values">
+            {#if row.cost !== undefined && row.cost !== null}
+              <span class="cost" title={formatCostPrecise(row.cost)}>
+                {formatCost(row.cost)}
+              </span>
+            {/if}
+            <span class="value">{formatCompact(row.tokens)}</span>
+          </div>
         </div>
         <div class="bar">
           <span style:width={`${(row.tokens / max) * 100}%`}></span>
@@ -50,6 +57,17 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .values {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .cost {
+    font-family: var(--font-num);
+    font-size: 10.5px;
+    color: var(--text-1);
+    font-variant-numeric: tabular-nums;
   }
   .value {
     font-family: var(--font-num);

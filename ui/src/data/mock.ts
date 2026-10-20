@@ -233,17 +233,30 @@ function buildProfiles(range: Range, totals: TokenTotals): ProfileCard[] {
       quota: quotaOverrides.has(def.id)
         ? quotaOverrides.get(def.id)!
         : (defaultQuotas.get(def.id) ?? null),
+      cost: {
+        total: Math.round(tokens.total * 0.000005 * 100) / 100,
+        coverage: 1.0,
+        is_complete: true,
+        unpriced_tokens: 0,
+      },
     };
   });
 
   const unknownTotal = Math.max(1, totals.total - used);
+  const unknownTokens = splitTotal(unknownTotal);
   known.push({
     profile_id: null,
     display_name: "Unknown",
     endpoint: null,
     inferred: true,
-    tokens: splitTotal(unknownTotal),
+    tokens: unknownTokens,
     quota: null,
+    cost: {
+      total: Math.round(unknownTokens.total * 0.000004 * 100) / 100,
+      coverage: 1.0,
+      is_complete: true,
+      unpriced_tokens: 0,
+    },
   });
 
   return known.sort((a, b) => b.tokens.total - a.tokens.total);
@@ -253,10 +266,15 @@ function buildDashboard(range: Range): Dashboard {
   const totals = buildTotals(range);
   const delta = liveTotal();
 
-  const models = BASE_MODELS[range].map((row, index) => ({
-    ...row,
-    tokens: row.tokens + (index === 0 ? delta : 0),
-  }));
+  const models = BASE_MODELS[range].map((row, index) => {
+    const tokens = row.tokens + (index === 0 ? delta : 0);
+    const unitRate = index === 0 ? 0.000015 : index === 1 ? 0.000003 : 0.0000008;
+    return {
+      ...row,
+      tokens,
+      cost: Math.round(tokens * unitRate * 100) / 100,
+    };
+  });
 
   const titles =
     lang === "zh"
@@ -279,9 +297,16 @@ function buildDashboard(range: Range): Dashboard {
     .filter((pulse) => pulse.t_ms >= now - 3_600_000)
     .map((pulse) => ({ ...pulse }));
 
+  const totalCost = Math.round(totals.total * 0.0000052 * 100) / 100;
   return {
     range,
     totals,
+    cost: {
+      total: totalCost,
+      coverage: 1.0,
+      is_complete: true,
+      unpriced_tokens: 0,
+    },
     pulses: windowPulses,
     models,
     profiles: buildProfiles(range, totals),
@@ -443,6 +468,9 @@ export function createMockAdapter(): UiAdapter {
     onDashboardDirty(cb) {
       dirtySubs.add(cb);
       return () => dirtySubs.delete(cb);
+    },
+    onPricingUpdated() {
+      return () => {};
     },
 
     setVisible(next) {

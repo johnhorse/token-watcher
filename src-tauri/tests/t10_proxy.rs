@@ -1,20 +1,19 @@
 //! t10_proxy: v0.2 本地代理模式端到端与晚到对账集成测试
 
 use std::fs;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use axum::response::sse::{Event as AxumEvent, Sse};
-use axum::routing::{get, post};
+use axum::routing::post;
 use axum::Router;
 use futures_util::stream;
 use token_watcher_lib::core::parse::UsageRecord;
 use token_watcher_lib::core::store::Store;
-use token_watcher_lib::proxy::{self, SseSniffer};
-use token_watcher_lib::watch::{self, Message};
+use token_watcher_lib::proxy;
+use token_watcher_lib::watch::Message;
 
 struct TempDir {
     path: PathBuf,

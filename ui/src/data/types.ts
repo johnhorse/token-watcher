@@ -17,10 +17,17 @@ export interface UsagePulse {
   cache_read: number;
   cache_creation: number;
 }
+export interface TokenCost {
+  total: number;
+  coverage: number;
+  is_complete: boolean;
+  unpriced_tokens: number;
+}
 
 export interface ModelRow {
   model: string;
   tokens: number;
+  cost?: number | null;
 }
 
 export interface Quota {
@@ -38,6 +45,7 @@ export interface ProfileCard {
   inferred: boolean;
   tokens: TokenTotals;
   quota: Quota | null;
+  cost?: TokenCost | null;
 }
 
 export interface SessionRow {
@@ -51,6 +59,7 @@ export interface SessionRow {
 export interface Dashboard {
   range: Range;
   totals: TokenTotals;
+  cost: TokenCost;
   /** 固定最近 1 小时（与 range 无关） */
   pulses: UsagePulse[];
   models: ModelRow[];
@@ -117,7 +126,7 @@ export interface UiAdapter {
   onScanProgress(cb: (status: ScanStatus) => void): Unsubscribe;
   onDataHealth(cb: (health: DataHealth) => void): Unsubscribe;
   onDashboardDirty(cb: () => void): Unsubscribe;
-
+  onPricingUpdated?: (cb: () => void) => Unsubscribe;
   /**
    * 窗口可见性通知。Tauri 侧 Rust 自己监听窗口事件暂停 emit（契约未定义
    * 对应 command），真实 adapter 为空实现；mock 用它停/启脉冲定时器。

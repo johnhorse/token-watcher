@@ -18,6 +18,9 @@ const zh = {
   "breakdown.output": "输出",
   "breakdown.cacheRead": "缓存读",
   "breakdown.cacheWrite": "缓存写",
+  "cost.estimated": "估算花费",
+  "cost.estimateTooltip": "基于公网模型基准价估算",
+  "cost.unpricedNote": "含 {n} 未定价 Token",
 
   "activity.title": "实时活动 · 最近 1 小时",
   "activity.metric": "Reported tokens/s",
@@ -92,6 +95,9 @@ const en: Record<MessageKey, string> = {
   "breakdown.output": "out",
   "breakdown.cacheRead": "cache read",
   "breakdown.cacheWrite": "cache write",
+  "cost.estimated": "Est. Cost",
+  "cost.estimateTooltip": "Estimated based on public benchmark pricing",
+  "cost.unpricedNote": "{n} unpriced tokens",
 
   "activity.title": "Live activity · last hour",
   "activity.metric": "Reported tokens/s",

@@ -16,6 +16,23 @@ export function formatCompact(value: number): string {
 export function formatPercent(value: number): string {
   return `${Math.round(value * 10) / 10}`.replace(/\.0$/, "");
 }
+export function formatCost(value: number | null | undefined): string {
+  if (value === null || value === undefined || isNaN(value)) return "—";
+  if (value === 0) return "$0.00";
+  if (value >= 10.0) {
+    return `$${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+  if (value >= 0.01) {
+    return `$${value.toFixed(2)}`;
+  }
+  return "<$0.01";
+}
+
+export function formatCostPrecise(value: number | null | undefined): string {
+  if (value === null || value === undefined || isNaN(value)) return "—";
+  return `$${value.toFixed(4)}`;
+}
+
 
 export function parseTokenInput(input: string): {
   value: number | null;

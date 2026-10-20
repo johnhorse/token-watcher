@@ -37,6 +37,7 @@ fn empty_dashboard(range: Range) -> Dashboard {
     Dashboard {
         range,
         totals: TokenTotals::default(),
+        cost: crate::core::pricing::TokenCost::default(),
         pulses: Vec::new(),
         models: Vec::new(),
         profiles: Vec::new(),
@@ -59,9 +60,10 @@ pub fn get_dashboard(state: State<'_, AppState>, range: String) -> Result<Dashbo
         *guard = Some(store);
     }
     let store = guard.as_ref().expect("上面刚放入");
-    agg::dashboard(store, range).map_err(|e| e.to_string())
+    let price_table = state.pricing.table();
+    let price_guard = price_table.read().unwrap();
+    agg::dashboard_with_prices(store, range, Some(&price_guard)).map_err(|e| e.to_string())
 }
-
 #[tauri::command]
 pub fn get_scan_status(state: State<'_, AppState>) -> ScanStatusResponse {
     let snap = state.status.lock().map(|s| s.clone()).unwrap_or_default();

@@ -5,6 +5,8 @@
     formatExact,
     formatPercent,
     parseTokenInput,
+    formatCost,
+    formatCostPrecise,
   } from "../format";
   import { t } from "../i18n";
   import type { ProfileCard } from "../data";
@@ -123,6 +125,22 @@
         <div class="head">
           <span class="name" title={name}>{name}</span>
           <div class="head-right">
+            {#if profile.cost}
+              <span
+                class="cost"
+                title={`${t("cost.estimateTooltip")} · ${formatCostPrecise(profile.cost.total)}`}
+              >
+                {formatCost(profile.cost.total)}
+                {#if !profile.cost.is_complete}
+                  <span
+                    class="unpriced-mark"
+                    title={t("cost.unpricedNote", {
+                      n: formatCompact(profile.cost.unpriced_tokens),
+                    })}>*</span
+                  >
+                {/if}
+              </span>
+            {/if}
             <span class="tokens">{formatCompact(profile.tokens.total)}</span>
             {#if !unknown}
               <button
@@ -312,6 +330,16 @@
     font-size: 11px;
     color: var(--text-2);
     font-variant-numeric: tabular-nums;
+  }
+  .cost {
+    font-family: var(--font-num);
+    font-size: 11px;
+    color: var(--text-1);
+    font-variant-numeric: tabular-nums;
+  }
+  .unpriced-mark {
+    color: var(--accent);
+    font-weight: bold;
   }
   .meta {
     display: flex;

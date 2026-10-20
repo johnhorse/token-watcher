@@ -17,10 +17,9 @@
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-
+use super::pricing::{PriceTable, TokenCost};
 use super::store::{Store, Totals};
 use super::CoreError;
-
 /// 激活会话判定窗口（5 分钟）。
 /// 与 `attr::GRACE_MS` 当前同值但语义独立：两者同属 OQ4 的可调旋钮。
 pub const ACTIVE_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -84,12 +83,12 @@ pub struct UsagePulse {
 }
 
 /// 模型分布横条的一行
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ModelSlice {
     pub model: String,
     pub tokens: i64,
+    pub cost: Option<f64>,
 }
-
 /// 手动额度（R2-2：三列全 NULL = 未配置，卡面不显示配额条）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QuotaInfo {
@@ -99,7 +98,7 @@ pub struct QuotaInfo {
 }
 
 /// 订阅档案卡片（`profile_id = null` = Unknown 虚拟卡）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProfileCard {
     pub profile_id: Option<i64>,
     pub display_name: String,
@@ -108,8 +107,8 @@ pub struct ProfileCard {
     pub inferred: bool,
     pub tokens: TokenTotals,
     pub quota: Option<QuotaInfo>,
+    pub cost: Option<TokenCost>,
 }
-
 /// 会话列表的一行
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionRow {
@@ -123,16 +122,16 @@ pub struct SessionRow {
 }
 
 /// 悬浮窗一次水合的全部数据（契约 `Dashboard`）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Dashboard {
     pub range: Range,
     pub totals: TokenTotals,
+    pub cost: TokenCost,
     pub pulses: Vec<UsagePulse>,
     pub models: Vec<ModelSlice>,
     pub profiles: Vec<ProfileCard>,
     pub sessions: Vec<SessionRow>,
 }
-
 /// 桌面角落 HUD 紧凑概览数据（< 1ms 轻量查询）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct HudSummary {
@@ -152,25 +151,69 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// 聚合 Dashboard（使用系统当前时间）
+/// 聚合 Dashboard（使用系统当前时间，默认内置价目表）
 pub fn dashboard(store: &Store, range: Range) -> Result<Dashboard, CoreError> {
-    dashboard_at(store, range, now_ms())
+    dashboard_at_with_prices(store, range, now_ms(), None)
 }
 
-/// 同上，`now_ms` 显式传入（测试可注入固定时钟）；
+/// 聚合 Dashboard（使用系统当前时间，支持注入外部价目表）
+pub fn dashboard_with_prices(
+    store: &Store,
+    range: Range,
+    prices: Option<&PriceTable>,
+) -> Result<Dashboard, CoreError> {
+    dashboard_at_with_prices(store, range, now_ms(), prices)
+}
+/// 同上，`now_ms` 显式传入（测试可注入固定时钟，默认使用内置兜底价目表）；
 /// 脉冲窗口与「活跃」判定都以它为准。
 pub fn dashboard_at(store: &Store, range: Range, now_ms: i64) -> Result<Dashboard, CoreError> {
+    dashboard_at_with_prices(store, range, now_ms, None)
+}
+
+/// 支持注入外部价目表的聚合函数
+pub fn dashboard_at_with_prices(
+    store: &Store,
+    range: Range,
+    now_ms: i64,
+    prices: Option<&PriceTable>,
+) -> Result<Dashboard, CoreError> {
     let (start_ms, end_ms) = range_bounds(store, range, now_ms)?;
+    let totals = token_totals(store.totals_between(start_ms, end_ms)?);
+    let default_table;
+    let prices = match prices {
+        Some(p) => p,
+        None => {
+            default_table = PriceTable::bundled();
+            &default_table
+        }
+    };
+    let (models, priced_tokens, total_cost, unpriced_tokens) =
+        models_between(store, start_ms, end_ms, prices)?;
+    let profiles = profiles_between(store, start_ms, end_ms, prices)?;
+
+    let total_tokens = totals.total;
+    let coverage = if total_tokens == 0 {
+        1.0
+    } else {
+        priced_tokens as f64 / total_tokens as f64
+    };
+    let cost = TokenCost {
+        total: total_cost,
+        coverage: if coverage.is_finite() { coverage } else { 1.0 },
+        is_complete: unpriced_tokens == 0,
+        unpriced_tokens,
+    };
+
     Ok(Dashboard {
         range,
-        totals: token_totals(store.totals_between(start_ms, end_ms)?),
+        totals,
+        cost,
         pulses: recent_pulses(store, now_ms)?,
-        models: models_between(store, start_ms, end_ms)?,
-        profiles: profiles_between(store, start_ms, end_ms)?,
+        models,
+        profiles,
         sessions: sessions_between(store, start_ms, end_ms, now_ms)?,
     })
 }
-
 /// 托盘数字（使用系统当前时间）
 pub fn tray_metric(store: &Store, metric: TrayMetric) -> Result<i64, CoreError> {
     tray_metric_at(store, metric, now_ms())
@@ -315,10 +358,20 @@ fn recent_pulses(store: &Store, now_ms: i64) -> Result<Vec<UsagePulse>, CoreErro
     Ok(pulses)
 }
 
-/// 按模型聚合，tokens 降序；tokens 为 0 的模型不出现
-fn models_between(store: &Store, start_ms: i64, end_ms: i64) -> Result<Vec<ModelSlice>, CoreError> {
+/// 按模型聚合，tokens 降序；tokens 为 0 的模型不出现。
+/// 附带计算每个模型的估算成本，并返回 (models, priced_tokens, priced_cost, unpriced_tokens)。
+fn models_between(
+    store: &Store,
+    start_ms: i64,
+    end_ms: i64,
+    prices: &PriceTable,
+) -> Result<(Vec<ModelSlice>, i64, f64, i64), CoreError> {
     let mut stmt = store.conn().prepare_cached(
         "SELECT model,
+                SUM(input_tokens),
+                SUM(output_tokens),
+                SUM(cache_read_tokens),
+                SUM(cache_creation_tokens),
                 SUM(input_tokens + output_tokens
                     + cache_read_tokens + cache_creation_tokens) AS tokens
          FROM usage_records
@@ -327,15 +380,113 @@ fn models_between(store: &Store, start_ms: i64, end_ms: i64) -> Result<Vec<Model
          HAVING tokens > 0
          ORDER BY tokens DESC, model ASC",
     )?;
+    let mut priced_tokens = 0i64;
+    let mut total_cost = 0.0f64;
+    let mut unpriced_tokens = 0i64;
+
     let models = stmt
         .query_map(params![start_ms, end_ms], |row| {
-            Ok(ModelSlice {
-                model: row.get(0)?,
-                tokens: row.get(1)?,
-            })
+            let model: String = row.get(0)?;
+            let input: i64 = row.get(1)?;
+            let output: i64 = row.get(2)?;
+            let cache_read: i64 = row.get(3)?;
+            let cache_creation: i64 = row.get(4)?;
+            let tokens: i64 = row.get(5)?;
+
+            let unit = prices.get_unit_price(&model);
+            let cost = unit.map(|u| u.calculate(input, output, cache_read, cache_creation));
+            Ok((model, tokens, cost))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(models)
+
+    let mut slices = Vec::with_capacity(models.len());
+    for (model, tokens, cost) in models {
+        match cost {
+            Some(c) => {
+                priced_tokens += tokens;
+                total_cost += c;
+            }
+            None => {
+                unpriced_tokens += tokens;
+            }
+        }
+        slices.push(ModelSlice {
+            model,
+            tokens,
+            cost,
+        });
+    }
+
+    Ok((slices, priced_tokens, total_cost, unpriced_tokens))
+}
+
+/// 计算每个 profile_id 的模型细分成本
+fn profile_costs_between(
+    store: &Store,
+    start_ms: i64,
+    end_ms: i64,
+    prices: &PriceTable,
+) -> Result<std::collections::HashMap<Option<i64>, TokenCost>, CoreError> {
+    let mut stmt = store.conn().prepare_cached(
+        "SELECT r.profile_id,
+                r.model,
+                SUM(r.input_tokens),
+                SUM(r.output_tokens),
+                SUM(r.cache_read_tokens),
+                SUM(r.cache_creation_tokens),
+                SUM(r.input_tokens + r.output_tokens
+                    + r.cache_read_tokens + r.cache_creation_tokens) AS tokens
+         FROM usage_records r
+         WHERE r.timestamp_ms >= ?1 AND r.timestamp_ms < ?2
+         GROUP BY r.profile_id, r.model
+         HAVING tokens > 0",
+    )?;
+
+    let mut map: std::collections::HashMap<Option<i64>, (f64, i64, i64)> =
+        std::collections::HashMap::new();
+
+    let rows = stmt.query_map(params![start_ms, end_ms], |row| {
+        let profile_id: Option<i64> = row.get(0)?;
+        let model: String = row.get(1)?;
+        let input: i64 = row.get(2)?;
+        let output: i64 = row.get(3)?;
+        let cache_read: i64 = row.get(4)?;
+        let cache_creation: i64 = row.get(5)?;
+        let tokens: i64 = row.get(6)?;
+        Ok((profile_id, model, input, output, cache_read, cache_creation, tokens))
+    })?;
+
+    for item in rows {
+        let (profile_id, model, input, output, cache_read, cache_creation, tokens) = item?;
+        let entry = map.entry(profile_id).or_insert((0.0, 0, 0));
+        if let Some(unit) = prices.get_unit_price(&model) {
+            entry.0 += unit.calculate(input, output, cache_read, cache_creation);
+            entry.1 += tokens;
+        } else {
+            entry.2 += tokens;
+        }
+    }
+
+    let mut result = std::collections::HashMap::new();
+    for (profile_id, (cost, priced, unpriced)) in map {
+        let total = priced + unpriced;
+        let coverage = if total == 0 {
+            1.0
+        } else {
+            priced as f64 / total as f64
+        };
+        result.insert(
+            profile_id,
+            TokenCost {
+                total: cost,
+                coverage: if coverage.is_finite() { coverage } else { 1.0 },
+                is_complete: unpriced == 0,
+                unpriced_tokens: unpriced,
+            },
+        );
+    }
+
+    Ok(result)
 }
 
 /// 按档案聚合：非 Unknown 按 tokens 降序在前，Unknown 虚拟卡固定最后。
@@ -344,7 +495,9 @@ fn profiles_between(
     store: &Store,
     start_ms: i64,
     end_ms: i64,
+    prices: &PriceTable,
 ) -> Result<Vec<ProfileCard>, CoreError> {
+    let profile_costs = profile_costs_between(store, start_ms, end_ms, prices)?;
     let mut stmt = store.conn().prepare_cached(
         "SELECT r.profile_id,
                 p.display_name, p.endpoint,
@@ -380,6 +533,7 @@ fn profiles_between(
                         reset_date: quota_reset_date,
                     })
                 };
+            let cost = profile_costs.get(&profile_id).copied();
             Ok(ProfileCard {
                 profile_id,
                 display_name: display_name.unwrap_or_else(|| UNKNOWN_DISPLAY_NAME.to_string()),
@@ -387,6 +541,7 @@ fn profiles_between(
                 inferred: true,
                 tokens,
                 quota,
+                cost,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;

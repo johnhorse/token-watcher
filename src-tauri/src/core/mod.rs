@@ -8,6 +8,7 @@ pub mod attr;
 pub mod ingest;
 pub mod parse;
 pub mod store;
+pub mod pricing;
 
 use std::fmt;
 
