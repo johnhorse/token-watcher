@@ -52,6 +52,49 @@
   let dirtyTimer: ReturnType<typeof setTimeout> | undefined;
 
   let totalLabel = $derived(t(TOTAL_LABEL[range]));
+  const THEME_NAMES: Record<string, MessageKey> = {
+    "meter-face": "theme.meter",
+    slate: "theme.slate",
+    mint: "theme.mint",
+  };
+
+  const THEME_CYCLE: Record<string, string> = {
+    "meter-face": "slate",
+    slate: "mint",
+    mint: "meter-face",
+  };
+
+  function getInitialTheme(): string {
+    try {
+      const saved = localStorage.getItem("token_watcher_theme");
+      if (saved === "slate" || saved === "mint" || saved === "meter-face") return saved;
+    } catch {}
+    return "meter-face";
+  }
+
+  let theme = $state<string>(getInitialTheme());
+  let themeLabel = $derived(t(THEME_NAMES[theme] ?? "theme.meter"));
+
+  async function cycleTheme() {
+    const prev = theme;
+    const next = THEME_CYCLE[prev] || "meter-face";
+    theme = next;
+    document.documentElement.setAttribute("data-theme", next);
+    try {
+      localStorage.setItem("token_watcher_theme", next);
+    } catch {}
+    try {
+      await adapter.setTheme(next);
+    } catch (e) {
+      console.error("Failed to set theme", e);
+      theme = prev;
+      document.documentElement.setAttribute("data-theme", prev);
+      try {
+        localStorage.setItem("token_watcher_theme", prev);
+      } catch {}
+    }
+  }
+
 
   function mergePulses(incoming: UsagePulse[]): void {
     const byTime = new Map<number, UsagePulse>();
@@ -119,6 +162,31 @@
     const offHealth = adapter.onDataHealth((next) => {
       health = next;
     });
+    const offTheme = adapter.onThemeChanged((nextTheme) => {
+      if (nextTheme === "slate" || nextTheme === "mint" || nextTheme === "meter-face") {
+        theme = nextTheme;
+        document.documentElement.setAttribute("data-theme", nextTheme);
+        try {
+          localStorage.setItem("token_watcher_theme", nextTheme);
+        } catch {}
+      }
+    });
+
+    void (async () => {
+      try {
+        const serverTheme = await adapter.getTheme();
+        if (serverTheme === "slate" || serverTheme === "mint" || serverTheme === "meter-face") {
+          theme = serverTheme;
+          document.documentElement.setAttribute("data-theme", serverTheme);
+          try {
+            localStorage.setItem("token_watcher_theme", serverTheme);
+          } catch {}
+        }
+      } catch (error) {
+        console.warn("getTheme failed", error);
+      }
+    })();
+
 
     const onFocusOrVisible = () => {
       const visible = !document.hidden;
@@ -160,6 +228,7 @@
       offPricing?.();
       offScan();
       offHealth();
+      offTheme();
       document.removeEventListener("visibilitychange", onFocusOrVisible);
       window.removeEventListener("focus", onFocusOrVisible);
       if (dirtyTimer) clearTimeout(dirtyTimer);
@@ -231,6 +300,16 @@
               >{t("health.skipped", { n: health.skipped_files })}</span
             >
           {/if}
+          <button
+            type="button"
+            class="theme-toggle-btn"
+            onclick={cycleTheme}
+            title={t("theme.toggleTooltip", { theme: themeLabel })}
+            aria-label={t("theme.toggleTooltip", { theme: themeLabel })}
+          >
+            <span class="theme-icon" aria-hidden="true">◓</span>
+            <span>{themeLabel}</span>
+          </button>
         </div>
       </div>
       <div class="big"><Digits value={dashboard.totals.total} /></div>
@@ -343,6 +422,30 @@
     padding: 1px 5px;
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
+  }
+  .theme-toggle-btn {
+    font-family: var(--font-num);
+    font-size: 9.5px;
+    color: var(--text-2);
+    background: var(--bg-2);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    padding: 1px 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+  }
+  .theme-toggle-btn:hover {
+    color: var(--text-1);
+    border-color: var(--text-2);
+  }
+  .theme-icon {
+    color: var(--accent);
+    font-size: 10px;
+    line-height: 1;
   }
   .big {
     font-size: 40px;

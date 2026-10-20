@@ -372,6 +372,15 @@ function tickScan(): void {
 }
 
 let healthEmitted = false;
+let currentTheme = "meter-face";
+try {
+  const saved = typeof localStorage !== "undefined" ? localStorage.getItem("token_watcher_theme") : null;
+  if (saved === "slate" || saved === "mint" || saved === "meter-face") {
+    currentTheme = saved;
+  }
+} catch {}
+const themeSubs = new Set<(theme: string) => void>();
+
 
 export function createMockAdapter(): UiAdapter {
   if (!EMPTY_SCAN) {
@@ -476,6 +485,22 @@ export function createMockAdapter(): UiAdapter {
     async setHudLocked() {},
     async saveHudPosition() {},
     async showMainWindow() {},
+    async getTheme() {
+      return currentTheme;
+    },
+    async setTheme(theme: string) {
+      currentTheme = theme;
+      try {
+        if (typeof localStorage !== "undefined") {
+          localStorage.setItem("token_watcher_theme", theme);
+        }
+      } catch {}
+      for (const cb of themeSubs) cb(theme);
+    },
+    onThemeChanged(cb) {
+      themeSubs.add(cb);
+      return () => themeSubs.delete(cb);
+    },
 
     onPulse(cb) {
       pulseSubs.add(cb);

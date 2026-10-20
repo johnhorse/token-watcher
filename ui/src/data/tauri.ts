@@ -71,6 +71,9 @@ export function createTauriAdapter(): UiAdapter {
     setHudLocked: (locked) => invoke<void>("set_hud_locked", { locked }),
     saveHudPosition: (x, y) => invoke<void>("save_hud_position", { x, y }),
     showMainWindow: () => invoke<void>("show_main_window"),
+    getTheme: () => invoke<string>("get_theme"),
+    setTheme: (theme: string) => invoke<void>("set_theme", { theme }),
+    onThemeChanged: (cb) => subscribe<string>("theme-changed", cb),
 
 
     onPulse: (cb) => subscribe<UsagePulse>("usage-pulse", cb),

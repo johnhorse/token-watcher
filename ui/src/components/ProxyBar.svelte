@@ -144,9 +144,9 @@
     font-size: 9px;
     padding: 1px 4px;
     border-radius: 2px;
-    background: rgba(245, 158, 11, 0.15);
-    color: var(--amber);
-    border: 1px solid rgba(245, 158, 11, 0.3);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
     font-weight: 500;
     white-space: nowrap;
   }
@@ -173,8 +173,8 @@
     border-color: var(--text-2);
   }
   .action-btn.highlight {
-    color: var(--amber);
-    border-color: rgba(245, 158, 11, 0.4);
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   }
   .action-btn:disabled {
     opacity: 0.5;

@@ -4,6 +4,16 @@
   import { createAdapter, type HudSummary, type UiAdapter } from "./data";
   import { formatCompact, formatExact } from "./format";
 
+  if (typeof document !== "undefined") {
+    document.documentElement.setAttribute("data-hud", "true");
+    try {
+      const saved = localStorage.getItem("token_watcher_theme");
+      if (saved === "slate" || saved === "mint" || saved === "meter-face") {
+        document.documentElement.setAttribute("data-theme", saved);
+      }
+    } catch {}
+  }
+
   const adapter: UiAdapter = createAdapter();
 
   let summary = $state<HudSummary>({
@@ -91,6 +101,29 @@
       void loadSummary();
     });
 
+    const offTheme = adapter.onThemeChanged((theme) => {
+      if (theme === "slate" || theme === "mint" || theme === "meter-face") {
+        document.documentElement.setAttribute("data-theme", theme);
+        try {
+          localStorage.setItem("token_watcher_theme", theme);
+        } catch {}
+      }
+    });
+
+    void (async () => {
+      try {
+        const serverTheme = await adapter.getTheme();
+        if (serverTheme === "slate" || serverTheme === "mint" || serverTheme === "meter-face") {
+          document.documentElement.setAttribute("data-theme", serverTheme);
+          try {
+            localStorage.setItem("token_watcher_theme", serverTheme);
+          } catch {}
+        }
+      } catch (err) {
+        console.warn("Failed to get theme in HUD", err);
+      }
+    })();
+
     // 定期刷新衰减速率（30 秒一次）
     const decayTimer = setInterval(() => {
       void loadSummary();
@@ -99,6 +132,7 @@
     return () => {
       offPulse();
       offDirty();
+      offTheme();
       clearInterval(decayTimer);
       if (pulseTimeout) clearTimeout(pulseTimeout);
     };
@@ -109,6 +143,7 @@
   class="hud-pill"
   class:pulsing={isPulsing}
   class:locked={summary.hud_locked}
+  data-hud="true"
   data-tauri-drag-region
   onpointerdown={handlePointerDown}
   onpointerup={handlePointerUp}
@@ -165,7 +200,7 @@
   }
 
   .hud-pill.pulsing {
-    border-color: rgba(245, 158, 11, 0.45);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     background: rgba(26, 28, 34, 0.94);
   }
 
@@ -183,7 +218,7 @@
   .hud-icon {
     font-size: 11px;
     line-height: 1;
-    filter: drop-shadow(0 0 4px rgba(245, 158, 11, 0.3));
+    filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 30%, transparent));
   }
 
   .hud-rate-val {
@@ -211,7 +246,7 @@
     font-size: 12px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
-    color: #f59e0b;
+    color: var(--accent);
     letter-spacing: -0.3px;
   }
 </style>

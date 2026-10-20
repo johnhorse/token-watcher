@@ -139,6 +139,9 @@ export interface UiAdapter {
   setHudLocked(locked: boolean): Promise<void>;
   saveHudPosition(x: number, y: number): Promise<void>;
   showMainWindow(): Promise<void>;
+  getTheme(): Promise<string>;
+  setTheme(theme: string): Promise<void>;
+  onThemeChanged(cb: (theme: string) => void): Unsubscribe;
 
   onPulse(cb: (pulse: UsagePulse) => void): Unsubscribe;
   onScanProgress(cb: (status: ScanStatus) => void): Unsubscribe;

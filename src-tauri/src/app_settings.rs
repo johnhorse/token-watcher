@@ -14,6 +14,36 @@ use crate::core::agg::TrayMetric;
 /// 磁盘上的设置文件名
 pub const FILE_NAME: &str = "settings.json";
 
+/// 主题外观模式
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeMode {
+    #[default]
+    MeterFace,
+    Slate,
+    Mint,
+    #[serde(other)]
+    Unknown,
+}
+
+impl ThemeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MeterFace | Self::Unknown => "meter-face",
+            Self::Slate => "slate",
+            Self::Mint => "mint",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s {
+            "slate" => Self::Slate,
+            "mint" => Self::Mint,
+            _ => Self::MeterFace,
+        }
+    }
+}
+
 /// app 自身设置（未来字段一律给 serde 默认值，保证旧文件可读）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -28,6 +58,8 @@ pub struct AppSettings {
     pub hud_x: Option<i32>,
     /// 桌面角落 HUD 记忆 Y 坐标（逻辑像素，None 表示未保存或使用默认）
     pub hud_y: Option<i32>,
+    /// 主题模式（默认 MeterFace 经典工控仪表）
+    pub theme: ThemeMode,
 }
 
 impl Default for AppSettings {
@@ -38,6 +70,7 @@ impl Default for AppSettings {
             hud_locked: false,
             hud_x: None,
             hud_y: None,
+            theme: ThemeMode::MeterFace,
         }
     }
 }

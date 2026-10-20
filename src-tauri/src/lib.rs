@@ -213,7 +213,9 @@ pub fn run() {
             commands::save_hud_position,
             commands::show_main_window,
             commands::update_profile_quota_config,
-            commands::sync_profile_quota
+            commands::sync_profile_quota,
+            commands::get_theme,
+            commands::set_theme,
         ])
         .build(tauri::generate_context!());
 

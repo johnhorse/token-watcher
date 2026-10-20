@@ -98,6 +98,10 @@ const zh = {
   "proxy.inject": "接管 settings.json",
   "proxy.restore": "还原 settings.json",
   "proxy.injectedBadge": "已接管",
+  "theme.meter": "Meter",
+  "theme.slate": "Slate",
+  "theme.mint": "Mint",
+  "theme.toggleTooltip": "切换主题（当前：{theme}）",
 } as const;
 
 export type MessageKey = keyof typeof zh;
@@ -198,6 +202,10 @@ const en: Record<MessageKey, string> = {
   "proxy.inject": "Inject into settings.json",
   "proxy.restore": "Restore settings.json",
   "proxy.injectedBadge": "Injected",
+  "theme.meter": "Meter",
+  "theme.slate": "Slate",
+  "theme.mint": "Mint",
+  "theme.toggleTooltip": "Switch theme (current: {theme})",
 };
 
 const dict: Record<Lang, Record<MessageKey, string>> = { zh, en };

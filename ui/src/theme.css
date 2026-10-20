@@ -1,12 +1,19 @@
-/* T6 —— Meter Face 主题 tokens。暗色为设计基准，亮色跟随 prefers-color-scheme。 */
+/* ==========================================================================
+   0. 无条件默认基底（Meter Face 经典工控仪表）
+   ========================================================================== */
 :root {
   color-scheme: dark light;
+  --theme-id: "meter-face";
   --bg: #262420;
+  --bg-1: #2f2c27;
+  --bg-2: #38342e;
   --line: #3a3730;
   --line-strong: #4a463d;
   --text: #f2efe9;
-  --text-2: #8a857a;
-  --amber: #e8a33d;
+  --text-1: #ffffff;
+  --text-2: #948f83; /* 加深至 4.81:1 符合 WCAG AA */
+  --accent: #e8a33d;
+  --amber: var(--accent); /* 向下兼容 */
   --track: #3a3730;
   --skeleton: #332f2a;
   --font-ui: "Archivo", "PingFang SC", "Microsoft YaHei UI", -apple-system,
@@ -21,15 +28,92 @@
 }
 
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-hud]) {
     color-scheme: light;
     --bg: #f2efe9;
+    --bg-1: #e8e4da;
+    --bg-2: #ded9cd;
     --line: #dfdacd;
     --line-strong: #c9c3b2;
     --text: #262420;
+    --text-1: #141311;
     --text-2: #6e6a5f;
+    --accent: #92400e; /* 降档至 4.85:1 满足 AA */
+    --amber: var(--accent);
     --track: #dfdacd;
     --skeleton: #e7e2d6;
+  }
+}
+
+/* ==========================================================================
+   1. Calibrated Slate (精密冷调石板)
+   ========================================================================== */
+html[data-theme="slate"] {
+  --theme-id: "slate";
+  --bg: #16181d;
+  --bg-1: #1f2229;
+  --bg-2: #282c35;
+  --line: #262933;
+  --line-strong: #383c4a;
+  --text: #e2e8f0;
+  --text-1: #f8fafc;
+  --text-2: #8492a6;
+  --accent: #38bdf8; /* 天青冰蓝 */
+  --amber: var(--accent);
+  --track: #262933;
+  --skeleton: #1f2229;
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme="slate"]:not([data-hud]) {
+    --bg: #f1f5f9;
+    --bg-1: #e2e8f0;
+    --bg-2: #cbd5e1;
+    --line: #cbd5e1;
+    --line-strong: #94a3b8;
+    --text: #0f172a;
+    --text-1: #020617;
+    --text-2: #475569;
+    --accent: #0369a1; /* 5.42:1 满足 AA */
+    --amber: var(--accent);
+    --track: #cbd5e1;
+    --skeleton: #e2e8f0;
+  }
+}
+
+/* ==========================================================================
+   2. Mint Pulse (极客薄荷脉冲)
+   ========================================================================== */
+html[data-theme="mint"] {
+  --theme-id: "mint";
+  --bg: #111a16;
+  --bg-1: #17241f;
+  --bg-2: #1e3029;
+  --line: #1c2b24;
+  --line-strong: #2a3f35;
+  --text: #ecfdf5;
+  --text-1: #ffffff;
+  --text-2: #78988b; /* 沉稳鼠尾草绿，杜绝层级倒挂 */
+  --accent: #10b981; /* 极客荧光薄荷绿 */
+  --amber: var(--accent);
+  --track: #1c2b24;
+  --skeleton: #17231d;
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme="mint"]:not([data-hud]) {
+    --bg: #f0fdf4;
+    --bg-1: #dcfce7;
+    --bg-2: #bbf7d0;
+    --line: #bbf7d0;
+    --line-strong: #86efac;
+    --text: #064e3b;
+    --text-1: #022c22;
+    --text-2: #166534;
+    --accent: #047857; /* 5.24:1 满足 AA */
+    --amber: var(--accent);
+    --track: #bbf7d0;
+    --skeleton: #dcfce7;
   }
 }
 

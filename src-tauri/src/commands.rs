@@ -339,3 +339,25 @@ pub fn save_hud_position(state: State<'_, AppState>, x: i32, y: i32) -> Result<(
 pub fn show_main_window(app: AppHandle) -> Result<(), String> {
     crate::hud::show_main_window(&app)
 }
+
+#[tauri::command]
+pub fn get_theme(state: State<'_, AppState>) -> Result<String, String> {
+    let settings_path = crate::app_settings::path_for_db(&state.db_path);
+    let settings = crate::app_settings::AppSettings::load(&settings_path);
+    Ok(settings.theme.as_str().to_string())
+}
+
+#[tauri::command]
+pub fn set_theme(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    theme: String,
+) -> Result<(), String> {
+    let settings_path = crate::app_settings::path_for_db(&state.db_path);
+    let mut settings = crate::app_settings::AppSettings::load(&settings_path);
+    let mode = crate::app_settings::ThemeMode::from_str_loose(&theme);
+    settings.theme = mode;
+    settings.save(&settings_path).map_err(|e| e.to_string())?;
+    let _ = app.emit("theme-changed", mode.as_str());
+    Ok(())
+}
