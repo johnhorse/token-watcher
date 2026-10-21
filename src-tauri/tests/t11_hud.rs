@@ -74,6 +74,28 @@ fn test_hud_summary_rate_idle_after_inactive() {
 }
 
 #[test]
+fn test_hud_summary_six_metrics_and_real_token_rate() {
+    let mut store = Store::open_in_memory().unwrap();
+    let now_ms = 1_700_000_010_000;
+
+    // 活跃记录：10 秒前产生，包含 800 输入、200 输出、1000 缓存读取，模型为 claude-sonnet
+    let mut r = sample_record("msg_active", now_ms - 10_000, (800, 200, 1000, 0));
+    r.model = "claude-sonnet".to_string();
+    store.upsert_records(&[r]).unwrap();
+
+    let summary = hud_summary_at(&store, false, now_ms).unwrap();
+    assert_eq!(summary.total_today, 2000);
+    assert_eq!(summary.session_total, 2000);
+    assert_eq!(summary.current_model, "claude-sonnet");
+    assert_eq!(summary.input_tokens, 800);
+    assert_eq!(summary.output_tokens, 200);
+    // 缓存率：1000 / (800 + 1000) = 55.55%
+    assert!((summary.cache_rate - 55.55).abs() < 0.1);
+    // 纯输出生成速率 (tokens/s)：200 / 10s = 20 tokens/s（不再是上千的 K/s）
+    assert!((summary.current_rate - 20.0).abs() < 1.0);
+}
+
+#[test]
 fn test_app_settings_hud_fields_roundtrip() {
     let dir = std::env::temp_dir().join(format!("tw_test_settings_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);

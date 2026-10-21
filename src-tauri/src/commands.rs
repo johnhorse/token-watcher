@@ -51,7 +51,8 @@ pub fn get_dashboard(state: State<'_, AppState>, range: String) -> Result<Dashbo
     let snap = state.status.lock().map_err(|e| e.to_string())?.clone();
     // 首扫未完成：empty 返回空数据（UI 空态），scanning 返回空数据
     // （UI 状态机本就停在骨架，这里兜底防 fetch 失败横幅误报）
-    if snap.phase != "done" && snap.phase != "empty" {
+    // 仅在明确处于首扫且有剩余文件未完成时兜底返回空数据
+    if snap.phase == "scanning" && snap.files_total > 0 && snap.files_done < snap.files_total {
         return Ok(empty_dashboard(range));
     }
     let mut guard = state.store.lock().map_err(|e| e.to_string())?;
@@ -72,7 +73,7 @@ pub fn get_session_flight_recorder(
     limit: Option<usize>,
 ) -> Result<Option<agg::SessionFlightRecorder>, String> {
     let snap = state.status.lock().map_err(|e| e.to_string())?.clone();
-    if snap.phase != "done" && snap.phase != "empty" {
+    if snap.phase == "scanning" && snap.files_total > 0 && snap.files_done < snap.files_total {
         return Ok(None);
     }
     let mut guard = state.store.lock().map_err(|e| e.to_string())?;
@@ -308,7 +309,8 @@ pub fn get_hud_summary(state: State<'_, AppState>) -> Result<crate::core::agg::H
         *guard = Some(store);
     }
     let store = guard.as_ref().expect("上面刚放入");
-    crate::core::agg::hud_summary(store, settings.hud_locked).map_err(|e| e.to_string())
+    crate::core::agg::hud_summary(store, settings.hud_locked, &settings.effective_hud_metrics())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -359,9 +361,81 @@ pub fn save_hud_position(state: State<'_, AppState>, x: i32, y: i32) -> Result<(
 }
 
 #[tauri::command]
+pub fn move_hud_by(app: AppHandle, dx: f64, dy: f64) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(crate::hud::HUD_LABEL) {
+        if let Ok(pos) = window.outer_position() {
+            if let Ok(scale) = window.scale_factor() {
+                let new_x = pos.x + (dx * scale).round() as i32;
+                let new_y = pos.y + (dy * scale).round() as i32;
+                let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(new_x, new_y)));
+            }
+        }
+    }
+    Ok(())
+}
+#[tauri::command]
+pub fn resize_hud(app: AppHandle, width: f64) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(crate::hud::HUD_LABEL) {
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, crate::hud::HUD_HEIGHT)));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn show_hud_context_menu(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let settings_path = crate::app_settings::path_for_db(&state.db_path);
+    crate::hud::show_hud_context_menu(&app, &settings_path)
+}
+
+#[tauri::command]
+pub fn toggle_hud_metric(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    metric: String,
+) -> Result<Vec<String>, String> {
+    let settings_path = crate::app_settings::path_for_db(&state.db_path);
+    let mut settings = crate::app_settings::AppSettings::load(&settings_path);
+    let mut current = settings.effective_hud_metrics();
+    if current.contains(&metric) {
+        if current.len() > 2 {
+            current.retain(|m| m != &metric);
+        }
+    } else {
+        current.push(metric);
+    }
+    settings.hud_metrics = current.clone();
+    settings.save(&settings_path).map_err(|e| e.to_string())?;
+    let _ = app.emit("hud-updated", ());
+    Ok(current)
+}
+
+#[tauri::command]
+pub fn save_current_hud_position(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(crate::hud::HUD_LABEL) {
+        if let Ok(pos) = window.outer_position() {
+            if let Ok(scale) = window.scale_factor() {
+                let logical_x = (pos.x as f64 / scale).round() as i32;
+                let logical_y = (pos.y as f64 / scale).round() as i32;
+                let settings_path = crate::app_settings::path_for_db(&state.db_path);
+                let mut settings = crate::app_settings::AppSettings::load(&settings_path);
+                settings.hud_x = Some(logical_x);
+                settings.hud_y = Some(logical_y);
+                settings.save(&settings_path).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn show_main_window(app: AppHandle) -> Result<(), String> {
     crate::hud::show_main_window(&app)
 }
+#[tauri::command]
+pub fn log_js_error(msg: String) {
+    eprintln!("[WEBVIEW_JS_ERROR] {}", msg);
+}
+
 
 #[tauri::command]
 pub fn get_theme(state: State<'_, AppState>) -> Result<String, String> {

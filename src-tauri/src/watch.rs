@@ -135,6 +135,10 @@ pub trait EventSink: Send + 'static {
     /// T5：数据落库后的内部通知（驱动托盘刷新）。
     /// 默认 no-op：测试 MockSink 无需关心托盘。
     fn data_changed(&self) {}
+    /// 引擎扫描状态变更内部通知（同步 AppState 中的 status 快照，无视窗口可见性）。
+    fn status_changed(&self, _phase: &str, _done: u64, _total: u64, _percent: f64) {}
+    /// 窗口重新显示时触发状态回放补发。
+    fn window_shown(&self) {}
 }
 
 struct TauriSink {
@@ -197,6 +201,32 @@ impl EventSink for TauriSink {
                         }
                     }
                 }
+            }
+        }
+    }
+    fn status_changed(&self, phase: &str, done: u64, total: u64, percent: f64) {
+        if let Some(state) = self.app.try_state::<crate::AppState>() {
+            if let Ok(mut snap) = state.status.lock() {
+                snap.phase = phase.to_string();
+                snap.files_done = done;
+                snap.files_total = total;
+                snap.percent = percent;
+            }
+        }
+    }
+
+    fn window_shown(&self) {
+        let snap_opt = if let Some(state) = self.app.try_state::<crate::AppState>() {
+            state.status.lock().ok().map(|s| (s.phase.clone(), s.files_done, s.files_total))
+        } else {
+            None
+        };
+        if let Some((phase, done, total)) = snap_opt {
+            if !phase.is_empty() && self.is_visible() {
+                let _ = self.app.emit(
+                    "scan-progress",
+                    &progress_json(&phase, done, total),
+                );
             }
         }
     }
@@ -1157,6 +1187,7 @@ impl<S: EventSink> DataEngine<S> {
         } else {
             self.pending_dirty = true;
         }
+        self.sink.window_shown();
         if let Some(health) = self.pending_health.take() {
             if self.sink.is_visible() {
                 self.sink.emit_json("data-health", health.to_json());
@@ -1275,6 +1306,13 @@ impl<S: EventSink> DataEngine<S> {
 
     /// 发一个契约事件；窗口隐藏时挂起（后续任意事件恢复时补 dashboard-dirty）
     fn push_event(&mut self, event: &str, payload: Value) {
+        if event == "scan-progress" {
+            let phase = payload.get("phase").and_then(Value::as_str).unwrap_or("");
+            let done = payload.get("files_done").and_then(Value::as_u64).unwrap_or(0);
+            let total = payload.get("files_total").and_then(Value::as_u64).unwrap_or(0);
+            let percent = payload.get("percent").and_then(Value::as_f64).unwrap_or(0.0);
+            self.sink.status_changed(phase, done, total, percent);
+        }
         if self.sink.is_visible() {
             if self.pending_dirty {
                 self.pending_dirty = false;

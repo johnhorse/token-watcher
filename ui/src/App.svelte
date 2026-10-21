@@ -11,7 +11,7 @@
     type UsagePulse,
   } from "./data";
   import { t, type MessageKey } from "./i18n";
-  import { formatCompact, formatCost, formatCostPrecise } from "./format";
+  import { formatCompact, formatCost, formatCostPrecise, formatExact } from "./format";
   import Digits from "./components/Digits.svelte";
   import RangeChips from "./components/RangeChips.svelte";
   import Chart from "./components/Chart.svelte";
@@ -112,7 +112,7 @@
     const requested = range;
     try {
       const next = await adapter.getDashboard(requested);
-      if (seq !== loadSeq) return; // 期间发起了新请求（chips 切换等），丢弃旧响应
+      if (seq !== loadSeq) return;
       fetchFailed = false;
       dashboard = next;
       mergePulses(next.pulses);
@@ -212,10 +212,13 @@
         };
         if (status.phase === "empty") {
           phase = "empty";
-        } else if (status.phase === "done") {
+        } else if (status.phase === "done" || status.phase === "") {
           await loadNow();
-        } else if (phase !== "ready") {
-          phase = "scanning";
+        } else {
+          await loadNow();
+          if (status.phase === "scanning" && (!dashboard || dashboard.totals.total === 0)) {
+            if (phase !== "ready") phase = "scanning";
+          }
         }
       } catch (error) {
         console.error("get_scan_status failed", error);
@@ -269,6 +272,23 @@
   async function handleSyncQuota(profileId: number) {
     await adapter.syncProfileQuota(profileId);
   }
+  let compactDigits = $state(true);
+
+  if (typeof window !== "undefined") {
+    try {
+      const saved = localStorage.getItem("token_watcher_compact_digits");
+      if (saved !== null) {
+        compactDigits = saved === "true";
+      }
+    } catch {}
+  }
+
+  function toggleDigitsCompact() {
+    compactDigits = !compactDigits;
+    try {
+      localStorage.setItem("token_watcher_compact_digits", String(compactDigits));
+    } catch {}
+  }
 </script>
 
 <div class="app">
@@ -284,7 +304,10 @@
     {:else}
       <section class="totals">
         <div class="label-row">
-          <span class="label">{totalLabel}</span>
+          <span class="label">
+            <img src="/icon.png" alt="" class="brand-logo-img" aria-hidden="true" />
+            {totalLabel}
+          </span>
           <div class="header-tags">
             {#if dashboard.cost}
               <span
@@ -321,7 +344,22 @@
             </button>
           </div>
         </div>
-        <div class="big"><Digits value={dashboard.totals.total} /></div>
+        <div class="big">
+          <button
+            type="button"
+            class="digits-btn"
+            onclick={toggleDigitsCompact}
+            title={compactDigits
+              ? `${formatExact(dashboard.totals.total)} · ${t("digits.toggleToExact")}`
+              : `${formatCompact(dashboard.totals.total)} · ${t("digits.toggleToCompact")}`}
+            aria-label={compactDigits ? t("digits.toggleToExact") : t("digits.toggleToCompact")}
+          >
+            <Digits value={dashboard.totals.total} compact={compactDigits} />
+            <span class="unit-badge" aria-hidden="true">
+              {compactDigits ? t("digits.unitCompact") : t("digits.unitExact")}
+            </span>
+          </button>
+        </div>
         <div class="breakdown">
           <span
             >{t("breakdown.input")}
@@ -426,6 +464,14 @@
     position: relative;
     z-index: 1;
   }
+  .brand-logo-img {
+    width: 13px;
+    height: 13px;
+    border-radius: 3px;
+    vertical-align: -1.5px;
+    margin-right: 4px;
+    opacity: 0.9;
+  }
   .badge {
     font-family: var(--font-num);
     font-size: 9.5px;
@@ -465,6 +511,41 @@
     line-height: 1.15;
     margin: 4px 0 7px;
     letter-spacing: -0.01em;
+  }
+  .digits-btn {
+    appearance: none;
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    transition: opacity var(--dur-fast) var(--ease);
+  }
+  .digits-btn:hover {
+    opacity: 0.88;
+  }
+  .unit-badge {
+    font-size: 10px;
+    font-family: var(--font-num);
+    color: var(--text-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 1px 5px;
+    align-self: center;
+    line-height: 1.2;
+    background: var(--bg-1);
+    letter-spacing: 0;
+    user-select: none;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .digits-btn:hover .unit-badge {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
   }
   .breakdown {
     display: flex;

@@ -64,53 +64,94 @@
     const visible = sorted.filter(
       (pulse) => pulse.t_ms >= windowStart && pulse.t_ms <= end,
     );
+    if (visible.length === 0) {
+      return {
+        linePath: "",
+        areaPath: "",
+        last: null,
+        hasData: false,
+      };
+    }
+
     const totals = visible.map(
       (pulse) =>
         pulse.input + pulse.output + pulse.cache_read + pulse.cache_creation,
     );
-    const max = Math.max(1, ...totals);
     const plotW = W - LEFT - RIGHT;
-    const xOf = (ms: number) =>
-      LEFT + ((ms - windowStart) / WINDOW_MS) * plotW;
-    const yOf = (tokens: number) => BASE_Y - (tokens / max) * (BASE_Y - TOP);
 
-    const points: { x: number; y: number }[] = [{ x: LEFT, y: BASE_Y }];
-    for (let i = 0; i < visible.length; i += 1) {
-      const pulse = visible[i];
-      const previous = i > 0 ? visible[i - 1].t_ms : windowStart;
-      const next =
-        i < visible.length - 1 ? visible[i + 1].t_ms : end;
-      const half = Math.min(
-        Math.max(Math.min(pulse.t_ms - previous, next - pulse.t_ms) / 2, 20_000),
-        120_000,
-      );
-      points.push(
-        { x: Math.max(LEFT, xOf(pulse.t_ms - half)), y: BASE_Y },
-        { x: xOf(pulse.t_ms), y: yOf(totals[i]) },
-        {
-          x: Math.min(W - RIGHT, xOf(pulse.t_ms + half)),
-          y: BASE_Y,
-        },
+    // 高斯核平滑采样：64 个时域采样点覆盖 1 小时窗口，sigma = 90s
+    const M = 64;
+    const dt = WINDOW_MS / (M - 1);
+    const sigma = 90_000;
+    const twoSigmaSq = 2 * sigma * sigma;
+
+    const rawValues = new Float64Array(M);
+    let maxVal = 1;
+
+    for (let i = 0; i < M; i += 1) {
+      const t = windowStart + i * dt;
+      let sum = 0;
+      for (let j = 0; j < visible.length; j += 1) {
+        const diff = t - visible[j].t_ms;
+        if (Math.abs(diff) < 4 * sigma) {
+          sum += totals[j] * Math.exp(-(diff * diff) / twoSigmaSq);
+        }
+      }
+      rawValues[i] = sum;
+      if (sum > maxVal) maxVal = sum;
+    }
+
+    const points: { x: number; y: number }[] = [];
+    for (let i = 0; i < M; i += 1) {
+      const x = LEFT + (i / (M - 1)) * plotW;
+      const y = BASE_Y - (rawValues[i] / maxVal) * (BASE_Y - TOP);
+      points.push({ x, y });
+    }
+
+    // 采用 Catmull-Rom 样条拟合为连续三次贝塞尔曲线 (C 指令)，保证一阶导数连续无突兀折角
+    const pathParts = [`M${points[0].x.toFixed(1)},${points[0].y.toFixed(1)}`];
+    for (let i = 0; i < points.length - 1; i += 1) {
+      const p0 = i > 0 ? points[i - 1] : points[i];
+      const p1 = points[i];
+      const p2 = points[i + 1];
+      const p3 = i + 2 < points.length ? points[i + 2] : p2;
+
+      const cp1x = p1.x + (p2.x - p0.x) / 6;
+      let cp1y = p1.y + (p2.y - p0.y) / 6;
+      const cp2x = p2.x - (p3.x - p1.x) / 6;
+      let cp2y = p2.y - (p3.y - p1.y) / 6;
+
+      cp1y = Math.min(BASE_Y, Math.max(TOP, cp1y));
+      cp2y = Math.min(BASE_Y, Math.max(TOP, cp2y));
+
+      pathParts.push(
+        `C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`,
       );
     }
-    points.push({ x: W - RIGHT, y: BASE_Y });
 
-    const lastIndex = visible.length - 1;
+    const linePath = pathParts.join(" ");
+    const lastPoint = points[points.length - 1];
+    const firstPoint = points[0];
+    const areaPath = `${linePath} L${lastPoint.x.toFixed(1)},${BASE_Y.toFixed(1)} L${firstPoint.x.toFixed(1)},${BASE_Y.toFixed(1)} Z`;
+
+    // 引导点定位到最近脉冲的高斯波峰坐标
+    const lastIdx = visible.length - 1;
+    const lastPulse = visible[lastIdx];
+    const lastX = LEFT + ((lastPulse.t_ms - windowStart) / WINDOW_MS) * plotW;
+    let lastIntensity = 0;
+    for (let j = 0; j < visible.length; j += 1) {
+      const diff = lastPulse.t_ms - visible[j].t_ms;
+      if (Math.abs(diff) < 4 * sigma) {
+        lastIntensity += totals[j] * Math.exp(-(diff * diff) / twoSigmaSq);
+      }
+    }
+    const lastY = BASE_Y - (lastIntensity / maxVal) * (BASE_Y - TOP);
+
     return {
-      path: points
-        .map(
-          (point, index) =>
-            `${index === 0 ? "M" : "L"}${point.x.toFixed(1)},${point.y.toFixed(1)}`,
-        )
-        .join(" "),
-      last:
-        lastIndex >= 0
-          ? {
-              x: xOf(visible[lastIndex].t_ms),
-              y: yOf(totals[lastIndex]),
-            }
-          : null,
-      hasData: visible.length > 0,
+      linePath,
+      areaPath,
+      last: { x: lastX, y: lastY },
+      hasData: true,
     };
   });
 </script>
@@ -126,8 +167,18 @@
   </header>
   <div class="body">
     <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={t("activity.aria")}>
+      <defs>
+        <linearGradient id="trend-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--amber)" stop-opacity="0.22" />
+          <stop offset="70%" stop-color="var(--amber)" stop-opacity="0.04" />
+          <stop offset="100%" stop-color="var(--amber)" stop-opacity="0" />
+        </linearGradient>
+      </defs>
       <line class="baseline" x1="0" y1={BASE_Y} x2={W} y2={BASE_Y}></line>
-      <path class="line" d={geometry.path}></path>
+      {#if geometry.hasData}
+        <path class="area" d={geometry.areaPath} fill="url(#trend-fill)"></path>
+        <path class="line" d={geometry.linePath}></path>
+      {/if}
       {#if geometry.last}
         {#if flashAt !== null}
           <circle
@@ -203,10 +254,13 @@
     stroke: var(--line);
     stroke-width: 1;
   }
+  .area {
+    pointer-events: none;
+  }
   .line {
     fill: none;
     stroke: var(--amber);
-    stroke-width: 1.4;
+    stroke-width: 1.6;
     stroke-linejoin: round;
     stroke-linecap: round;
   }

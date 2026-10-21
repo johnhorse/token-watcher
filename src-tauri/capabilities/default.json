@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "主窗口与 HUD 窗口默认权限：事件收发与窗口控制",
   "windows": ["main", "hud"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "core:window:default"]
 }

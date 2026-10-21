@@ -45,11 +45,28 @@ impl ThemeMode {
 }
 
 /// app 自身设置（未来字段一律给 serde 默认值，保证旧文件可读）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub fn default_hud_metrics() -> Vec<String> {
+    vec![
+        "current_rate".to_string(),
+        "session_total".to_string(),
+        "cache_rate".to_string(),
+    ]
+}
+
+pub fn default_tray_metrics() -> Vec<TrayMetric> {
+    vec![TrayMetric::Total]
+}
+
+/// app 自身设置（未来字段一律给 serde 默认值，保证旧文件可读）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
-    /// 托盘显示指标（四选一，默认总 Token）
+    /// 托盘显示指标（兼容旧字段单选）
     pub tray_metric: TrayMetric,
+    /// 状态栏显示指标列表（多选 1-2 项，默认 [Total]）
+    pub tray_metrics: Vec<TrayMetric>,
+    /// 飞行面板选中的指标列表（默认 [当前速率, 会话总 Token, 缓存率]，最少 2 项）
+    pub hud_metrics: Vec<String>,
     /// 桌面角落 HUD 是否开启（默认 false）
     pub hud_visible: bool,
     /// 桌面角落 HUD 是否锁定并穿透鼠标（默认 false）
@@ -66,6 +83,8 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             tray_metric: TrayMetric::Total,
+            tray_metrics: default_tray_metrics(),
+            hud_metrics: default_hud_metrics(),
             hud_visible: false,
             hud_locked: false,
             hud_x: None,
@@ -77,10 +96,35 @@ impl Default for AppSettings {
 
 impl AppSettings {
     /// 读取设置：文件不存在/不可读 → 默认值；内容损坏 → 默认值并重建文件。
+    pub fn effective_tray_metrics(&self) -> Vec<TrayMetric> {
+        if self.tray_metrics.is_empty() {
+            vec![self.tray_metric]
+        } else {
+            self.tray_metrics.clone()
+        }
+    }
+
+    pub fn effective_hud_metrics(&self) -> Vec<String> {
+        if self.hud_metrics.len() < 2 {
+            default_hud_metrics()
+        } else {
+            self.hud_metrics.clone()
+        }
+    }
+
+    /// 读取设置：文件不存在/不可读 → 默认值；内容损坏 → 默认值并重建文件。
     pub fn load(path: &Path) -> Self {
         match fs::read_to_string(path) {
             Ok(text) => match serde_json::from_str::<Self>(&text) {
-                Ok(settings) => settings,
+                Ok(mut settings) => {
+                    if settings.tray_metrics.is_empty() {
+                        settings.tray_metrics = vec![settings.tray_metric];
+                    }
+                    if settings.hud_metrics.len() < 2 {
+                        settings.hud_metrics = default_hud_metrics();
+                    }
+                    settings
+                }
                 Err(e) => {
                     eprintln!("[token-watcher] 设置文件损坏，回退默认并重建: {e}");
                     let settings = Self::default();

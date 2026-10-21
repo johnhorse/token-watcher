@@ -178,7 +178,7 @@
           </span>
         </div>
         <div class="summary-right">
-          <span class="cost-badge hatch" class:unpriced={!recorder.cost.is_complete} title={t("cost.estimateTooltip")}>
+          <span class="cost-badge" class:unpriced={!recorder.cost.is_complete} title={t("cost.estimateTooltip")}>
             {formatCost(recorder.cost.total)}{#if !recorder.cost.is_complete}*{/if}
           </span>
         </div>
@@ -270,7 +270,7 @@
 
               <div class="event-cost-group">
                 <span
-                  class="event-cost hatch"
+                  class="event-cost"
                   class:unpriced={!evt.cost.is_complete}
                   title={evt.cost.is_complete ? undefined : "Unpriced tokens"}
                 >

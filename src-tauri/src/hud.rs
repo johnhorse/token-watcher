@@ -2,10 +2,11 @@
 //!
 //! 规约：docs/designs/v0.2-hud-mode-spec.md
 
+use tauri::menu::{ContextMenu, Menu};
 use tauri::{AppHandle, Manager, Position, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 pub const HUD_LABEL: &str = "hud";
-pub const HUD_WIDTH: f64 = 184.0;
+pub const HUD_WIDTH: f64 = 250.0;
 pub const HUD_HEIGHT: f64 = 34.0;
 
 /// 计算 HUD 窗口安全坐标（P1-2 多显示器拔插与越界防护）
@@ -128,6 +129,10 @@ pub fn apply_hud_locked(window: &WebviewWindow, locked: bool) -> Result<(), Stri
 /// 唤醒并聚焦主窗口
 pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(crate::watch::WINDOW_LABEL) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+        }
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -143,4 +148,63 @@ pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
     } else {
         Err("主窗口不存在".to_string())
     }
+}
+
+/// 弹出 HUD 原生右键菜单（配置 6 项指标与锁定开关）
+pub fn show_hud_context_menu(app: &AppHandle, settings_path: &std::path::Path) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(HUD_LABEL) else {
+        return Err("HUD 窗口不存在".to_string());
+    };
+    let settings = crate::app_settings::AppSettings::load(settings_path);
+    let active_metrics = settings.effective_hud_metrics();
+
+    use tauri::menu::{CheckMenuItem, IsMenuItem, PredefinedMenuItem};
+    let metric_defs = [
+        ("current_rate", "当前速率"),
+        ("session_total", "激活会话总 Token"),
+        ("current_model", "当前模型"),
+        ("cache_rate", "缓存率"),
+        ("input_tokens", "输入 Token 数"),
+        ("output_tokens", "输出 Token 数"),
+    ];
+
+    let mut items: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
+    for (id, label) in metric_defs {
+        let is_checked = active_metrics.contains(&id.to_string());
+        let item = CheckMenuItem::with_id(
+            app,
+            format!("hud-metric-{id}"),
+            label,
+            true,
+            is_checked,
+            None::<&str>,
+        )
+        .map_err(|e| e.to_string())?;
+        items.push(Box::new(item));
+    }
+
+    let sep = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
+    items.push(Box::new(sep));
+
+    let lock_text = if settings.hud_locked {
+        "解锁 HUD"
+    } else {
+        "锁定 HUD (鼠标穿透)"
+    };
+    let lock_item = tauri::menu::MenuItem::with_id(
+        app,
+        "hud-toggle-lock",
+        lock_text,
+        true,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
+    items.push(Box::new(lock_item));
+
+    let item_refs: Vec<&dyn IsMenuItem<tauri::Wry>> = items.iter().map(|b| b.as_ref()).collect();
+    let menu = Menu::with_items(app, &item_refs).map_err(|e| e.to_string())?;
+
+    menu.popup(window.as_ref().window().clone())
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }

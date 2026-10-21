@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { createAdapter, type HudSummary, type UiAdapter } from "./data";
   import { formatCompact, formatExact } from "./format";
 
@@ -19,18 +18,60 @@
   let summary = $state<HudSummary>({
     total_today: 0,
     rate_per_min: 0,
+    current_rate: 0,
+    session_total: 0,
+    current_model: "—",
+    cache_rate: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    hud_metrics: ["current_rate", "session_total", "cache_rate"],
     hud_locked: false,
   });
 
   let isPulsing = $state(false);
   let pulseTimeout: ReturnType<typeof setTimeout> | undefined;
 
+  let activeMetrics = $derived(
+    summary.hud_metrics && summary.hud_metrics.length >= 2
+      ? summary.hud_metrics
+      : ["current_rate", "session_total", "cache_rate"]
+  );
+
   let rateText = $derived.by(() => {
-    if (summary.rate_per_min <= 0) return "-";
-    return `${formatCompact(summary.rate_per_min)}/m`;
+    if (summary.current_rate <= 0) return "—";
+    return `${Math.round(summary.current_rate)}/s`;
   });
 
-  let totalText = $derived(formatExact(summary.total_today));
+  let sessionTotalText = $derived(
+    formatCompact(summary.session_total > 0 ? summary.session_total : summary.total_today)
+  );
+
+  let modelText = $derived.by(() => {
+    const raw = summary.current_model || "";
+    if (!raw || raw === "—") return "—";
+    if (raw.includes("sonnet-3-7") || raw.includes("3.7-sonnet")) return "Sonnet 3.7";
+    if (raw.includes("sonnet-3-5") || raw.includes("3.5-sonnet")) return "Sonnet 3.5";
+    if (raw.includes("sonnet")) return "Sonnet";
+    if (raw.includes("opus")) return "Opus";
+    if (raw.includes("haiku")) return "Haiku";
+    if (raw.includes("gpt-4o-mini")) return "4o-mini";
+    if (raw.includes("gpt-4o")) return "GPT-4o";
+    if (raw.includes("o1")) return "o1";
+    if (raw.includes("o3")) return "o3";
+    if (raw.includes("deepseek")) return "DeepSeek";
+    if (raw.includes("glm")) return "GLM";
+    return raw.split("-")[0];
+  });
+
+  let cacheRateText = $derived(`${Math.round(summary.cache_rate)}%`);
+  let inputText = $derived(formatCompact(summary.input_tokens));
+  let outputText = $derived(formatCompact(summary.output_tokens));
+
+  $effect(() => {
+    const count = activeMetrics.length;
+    const targetWidth = Math.max(180, Math.min(520, 180 + (count - 2) * 70));
+    void adapter.resizeHud(targetWidth);
+  });
 
   async function loadSummary(): Promise<void> {
     try {
@@ -48,42 +89,71 @@
       isPulsing = false;
     }, 400);
   }
-
-  // P1-3 加固：优雅处理拖拽与单击主面板的事件冲突
+  // 拖拽与单击主面板的区分处理（基于 Rust moveHudBy 与 setPointerCapture）
+  let lastScreenX = 0;
+  let lastScreenY = 0;
+  let isPointerDown = false;
+  let hasDragged = false;
   let pointerDownTime = 0;
-  let pointerDownX = 0;
-  let pointerDownY = 0;
+  let downDist = 0;
 
   function handlePointerDown(e: PointerEvent): void {
+    if (summary.hud_locked || e.button !== 0) return;
+    isPointerDown = true;
+    hasDragged = false;
+    downDist = 0;
     pointerDownTime = Date.now();
-    pointerDownX = e.screenX;
-    pointerDownY = e.screenY;
+    lastScreenX = e.screenX;
+    lastScreenY = e.screenY;
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {}
+  }
+
+  function handlePointerMove(e: PointerEvent): void {
+    if (!isPointerDown || summary.hud_locked) return;
+    const dx = e.screenX - lastScreenX;
+    const dy = e.screenY - lastScreenY;
+    lastScreenX = e.screenX;
+    lastScreenY = e.screenY;
+    downDist += Math.hypot(dx, dy);
+
+    if (downDist > 3) {
+      hasDragged = true;
+      void adapter.moveHudBy(dx, dy);
+    }
   }
 
   async function handlePointerUp(e: PointerEvent): Promise<void> {
-    const elapsed = Date.now() - pointerDownTime;
-    const dist = Math.hypot(e.screenX - pointerDownX, e.screenY - pointerDownY);
+    if (!isPointerDown) return;
+    isPointerDown = false;
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {}
 
-    // 位移 <= 3px 且按压时间 < 300ms 判定为常规单击，唤起主面板
-    if (elapsed < 300 && dist <= 3) {
+    if (hasDragged) {
+      void adapter.saveCurrentHudPosition();
+      return;
+    }
+
+    if (summary.hud_locked) return;
+
+    const elapsed = Date.now() - pointerDownTime;
+    if (elapsed < 400 && downDist <= 3) {
       try {
         await adapter.showMainWindow();
       } catch (err) {
         console.error("showMainWindow failed", err);
       }
-      return;
     }
+  }
 
-    // 若发生了位移（拖拽），获取当前窗口位置并持久化保存
-    if (dist > 3) {
-      if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
-        try {
-          const pos = await getCurrentWebviewWindow().outerPosition();
-          await adapter.saveHudPosition(Math.round(pos.x), Math.round(pos.y));
-        } catch (err) {
-          console.warn("Failed to persist HUD position", err);
-        }
-      }
+  async function handleContextMenu(e: MouseEvent): Promise<void> {
+    e.preventDefault();
+    try {
+      await adapter.showHudContextMenu();
+    } catch (err) {
+      console.warn("showHudContextMenu failed", err);
     }
   }
 
@@ -101,6 +171,9 @@
       void loadSummary();
     });
 
+    const offHudUpdated = adapter.onHudUpdated ? adapter.onHudUpdated(() => {
+      void loadSummary();
+    }) : () => {};
     const offTheme = adapter.onThemeChanged((theme) => {
       if (theme === "slate" || theme === "mint" || theme === "meter-face") {
         document.documentElement.setAttribute("data-theme", theme);
@@ -132,7 +205,7 @@
     return () => {
       offPulse();
       offDirty();
-      offTheme();
+      offHudUpdated();
       clearInterval(decayTimer);
       if (pulseTimeout) clearTimeout(pulseTimeout);
     };
@@ -144,20 +217,48 @@
   class:pulsing={isPulsing}
   class:locked={summary.hud_locked}
   data-hud="true"
-  data-tauri-drag-region
   onpointerdown={handlePointerDown}
+  onpointermove={handlePointerMove}
   onpointerup={handlePointerUp}
+  oncontextmenu={handleContextMenu}
+  title={`会话: ${formatExact(summary.session_total)} | 今日: ${formatExact(summary.total_today)} tokens`}
 >
-  <div class="hud-section rate-section">
-    <span class="hud-icon">⚡️</span>
-    <span class="hud-rate-val">{rateText}</span>
-  </div>
+  {#each activeMetrics as metric, index}
+    {#if index > 0}
+      <div class="hud-divider"></div>
+    {/if}
 
-  <div class="hud-divider"></div>
-
-  <div class="hud-section total-section">
-    <span class="hud-total-val">{totalText}</span>
-  </div>
+    {#if metric === "current_rate"}
+      <div class="hud-section rate-section" title="当前输出生成速率">
+        <span class="hud-icon">⚡️</span>
+        <span class="hud-rate-val">{rateText}</span>
+      </div>
+    {:else if metric === "session_total"}
+      <div class="hud-section total-section" title="激活会话总 Token">
+        <span class="hud-total-val">{sessionTotalText}</span>
+      </div>
+    {:else if metric === "current_model"}
+      <div class="hud-section model-section" title={`当前模型: ${summary.current_model}`}>
+        <span class="hud-icon">🧠</span>
+        <span class="hud-model-val">{modelText}</span>
+      </div>
+    {:else if metric === "cache_rate"}
+      <div class="hud-section cache-section" title="会话缓存命中率">
+        <span class="hud-icon">💾</span>
+        <span class="hud-cache-val">{cacheRateText}</span>
+      </div>
+    {:else if metric === "input_tokens"}
+      <div class="hud-section input-section" title="输入 Token 数">
+        <span class="hud-icon">📥</span>
+        <span class="hud-val">{inputText}</span>
+      </div>
+    {:else if metric === "output_tokens"}
+      <div class="hud-section output-section" title="输出 Token 数">
+        <span class="hud-icon">📤</span>
+        <span class="hud-val">{outputText}</span>
+      </div>
+    {/if}
+  {/each}
 </main>
 
 <style>
@@ -210,11 +311,14 @@
     pointer-events: none;
   }
 
-  .rate-section {
+  .rate-section,
+  .model-section,
+  .cache-section,
+  .input-section,
+  .output-section {
     gap: 3px;
-    min-width: 58px;
+    white-space: nowrap;
   }
-
   .hud-icon {
     font-size: 11px;
     line-height: 1;
@@ -238,8 +342,8 @@
   }
 
   .total-section {
-    justify-content: flex-end;
-    flex: 1;
+    justify-content: center;
+    white-space: nowrap;
   }
 
   .hud-total-val {
@@ -248,5 +352,23 @@
     font-variant-numeric: tabular-nums;
     color: var(--accent);
     letter-spacing: -0.3px;
+  }
+
+  .hud-val,
+  .hud-cache-val,
+  .hud-model-val {
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: #cbd5e1;
+    letter-spacing: -0.2px;
+  }
+
+  .hud-cache-val {
+    color: #6ee7b7;
+  }
+
+  .hud-model-val {
+    color: #93c5fd;
   }
 </style>

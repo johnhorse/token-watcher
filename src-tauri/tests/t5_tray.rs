@@ -15,7 +15,7 @@ use token_watcher_lib::app_settings::AppSettings;
 use token_watcher_lib::core::agg::{self, tray_metric_at, TrayMetric};
 use token_watcher_lib::core::parse::UsageRecord;
 use token_watcher_lib::core::store::Store;
-use token_watcher_lib::tray::{compact_number, display, full_number, lang_from_locale, Lang};
+use token_watcher_lib::tray::{compact_number, display, display_multi, full_number, lang_from_locale, Lang};
 
 fn temp_dir(tag: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -106,6 +106,31 @@ fn metric_labels_cover_all_four_in_both_languages() {
         "Cache Read Tokens"
     );
     assert_eq!(Lang::En.metric_label(TrayMetric::Output), "Output Tokens");
+}
+
+#[test]
+fn window_menu_labels_display_main_window() {
+    assert_eq!(Lang::Zh.show_window(), "显示主面板");
+    assert_eq!(Lang::Zh.hide_window(), "隐藏主面板");
+    assert_eq!(Lang::En.show_window(), "Show Main Window");
+    assert_eq!(Lang::En.hide_window(), "Hide Main Window");
+}
+
+#[test]
+fn multi_metric_tray_display_and_cache_rate() {
+    // 单选缓存率测试
+    let single_rate = display(Lang::Zh, TrayMetric::CacheRate, 85);
+    assert_eq!(single_rate.title.as_deref(), Some("85%"));
+    assert_eq!(single_rate.tooltip, "缓存率: 85%");
+
+    // 双选总 Token + 缓存率测试，多个指标用 " • " 隔开
+    let multi = display_multi(
+        Lang::Zh,
+        &[TrayMetric::Total, TrayMetric::CacheRate],
+        &[1_500_000, 85],
+    );
+    assert_eq!(multi.title.as_deref(), Some("1.5M • 85%"));
+    assert_eq!(multi.tooltip, "总 Token: 1,500,000 • 缓存率: 85%");
 }
 
 #[test]

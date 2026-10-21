@@ -10,10 +10,24 @@
           }
         } catch (e) {}
       })();
+      window.addEventListener("error", function (e) {
+        var msg = "[JS_ERROR] " + e.message + " (" + e.filename + ":" + e.lineno + ")";
+        if (window.__TAURI_INTERNALS__) {
+          window.__TAURI_INTERNALS__.invoke("log_js_error", { msg: msg });
+        }
+      });
+      window.addEventListener("unhandledrejection", function (e) {
+        var reason = e.reason ? (e.reason.stack || e.reason.message || String(e.reason)) : "unknown";
+        var msg = "[JS_UNHANDLED_REJECTION] " + reason;
+        if (window.__TAURI_INTERNALS__) {
+          window.__TAURI_INTERNALS__.invoke("log_js_error", { msg: msg });
+        }
+      });
     </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>token-watcher</title>
+    <link rel="icon" type="image/png" href="/icon.png" />
   </head>
   <body>
     <div id="app"></div>

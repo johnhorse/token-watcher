@@ -72,6 +72,8 @@ export function createTauriAdapter(): UiAdapter {
     setHudLocked: (locked) => invoke<void>("set_hud_locked", { locked }),
     saveHudPosition: (x, y) => invoke<void>("save_hud_position", { x, y }),
     showMainWindow: () => invoke<void>("show_main_window"),
+    moveHudBy: (dx, dy) => invoke<void>("move_hud_by", { dx, dy }),
+    saveCurrentHudPosition: () => invoke<void>("save_current_hud_position"),
     getTheme: () => invoke<string>("get_theme"),
     setTheme: (theme: string) => invoke<void>("set_theme", { theme }),
     onThemeChanged: (cb) => subscribe<string>("theme-changed", cb),
@@ -81,6 +83,10 @@ export function createTauriAdapter(): UiAdapter {
         limit: limit ?? null,
       }),
     onSessionFlightUpdated: (cb) => subscribe<{ session_id: string }>("session-flight-updated", cb),
+    showHudContextMenu: () => invoke<void>("show_hud_context_menu"),
+    toggleHudMetric: (metric: string) => invoke<string[]>("toggle_hud_metric", { metric }),
+    resizeHud: (width: number) => invoke<void>("resize_hud", { width }),
+    onHudUpdated: (cb) => subscribe<void>("hud-updated", () => cb()),
 
 
     onPulse: (cb) => subscribe<UsagePulse>("usage-pulse", cb),

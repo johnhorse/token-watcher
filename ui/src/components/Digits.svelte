@@ -1,10 +1,10 @@
 <script lang="ts">
   // T6 —— 大数字逐位 120ms 上滑（机械寄存器，非滚轮）；burst 最多 3 步 × 80ms 中间值。
   import { onDestroy, untrack } from "svelte";
-  import { formatExact } from "../format";
+  import { formatCompact, formatExact } from "../format";
   import { prefersReducedMotion } from "../motion";
 
-  let { value }: { value: number } = $props();
+  let { value, compact = true }: { value: number; compact?: boolean } = $props();
 
   const reduced = prefersReducedMotion();
   const STEP_MS = 80;
@@ -12,14 +12,21 @@
 
   type Cell = { ch: string; prev: string | null; ver: number; digit: boolean };
 
+  function formatText(v: number): string {
+    if (compact) {
+      return formatCompact(v);
+    }
+    return formatExact(v);
+  }
+
   let display = $state(untrack(() => Math.round(value)));
   let roll = $state(ROLL_MS);
   let cells = $state<Cell[]>(
-    untrack(() => toCells(formatExact(display))),
+    untrack(() => toCells(formatText(display))),
   );
   let target = $derived(Math.round(value));
 
-  let prevText = untrack(() => formatExact(display));
+  let prevText = untrack(() => formatText(display));
   let version = 0;
   let timers: ReturnType<typeof setTimeout>[] = [];
 
@@ -38,7 +45,7 @@
   }
 
   function apply(next: number, duration: number): void {
-    const text = formatExact(next);
+    const text = formatText(next);
     const previous = prevText;
     cells = [...text].map((ch, index) => {
       const before = previous[index] ?? null;
@@ -54,6 +61,14 @@
     display = next;
     roll = duration;
   }
+
+  $effect(() => {
+    const _c = compact;
+    untrack(() => {
+      clearTimers();
+      apply(display, 0);
+    });
+  });
 
   $effect(() => {
     const goal = target;
@@ -81,7 +96,7 @@
 </script>
 
 <span class="digits" style={`--roll: ${roll}ms`}>
-  <span class="sr">{formatExact(target)}</span>
+  <span class="sr">{formatText(target)}</span>
   {#each cells as cell, index (index + ":" + cell.ver)}
     {#if cell.digit && cell.prev !== null}
       <span class="cell" aria-hidden="true">

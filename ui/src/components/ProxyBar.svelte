@@ -68,29 +68,39 @@
         {t("proxy.title")}
         <span class="port-num">127.0.0.1:{proxy.port}</span>
       </span>
-      {#if proxy.is_injected}
-        <span class="injected-tag">{t("proxy.injectedBadge")}</span>
-      {/if}
     </div>
-    <div class="actions">
-      <button class="action-btn" onclick={handleCopy} title={proxy.export_cmd}>
-        {copied ? t("proxy.copied") : t("proxy.copyCmd")}
-      </button>
-      <button
-        class="action-btn"
-        class:highlight={!proxy.is_injected}
-        onclick={toggleInjection}
-        disabled={actionLoading}
-      >
-        {proxy.is_injected ? t("proxy.restore") : t("proxy.inject")}
-      </button>
+    <div class="status-right">
+      <span class="injected-tag" class:active={proxy.is_injected}>
+        {proxy.is_injected ? t("proxy.injectedBadge") : t("proxy.notInjectedBadge")}
+      </span>
     </div>
   </div>
+
+  <div class="desc-row">
+    <p class="desc-text">
+      {proxy.is_injected ? t("proxy.injectedDesc") : t("proxy.injectDesc")}
+    </p>
+  </div>
+
   {#if proxy.upstream}
     <div class="meta-row">
       <span class="upstream-label">{t("proxy.upstream", { url: proxy.upstream })}</span>
     </div>
   {/if}
+
+  <div class="actions-row">
+    <button class="action-btn" onclick={handleCopy} title={proxy.export_cmd}>
+      {copied ? t("proxy.copied") : t("proxy.copyCmd")}
+    </button>
+    <button
+      class="action-btn"
+      class:highlight={!proxy.is_injected}
+      onclick={toggleInjection}
+      disabled={actionLoading}
+    >
+      {proxy.is_injected ? t("proxy.restore") : t("proxy.inject")}
+    </button>
+  </div>
 </div>
 
 <style>
@@ -98,9 +108,12 @@
     background: var(--bg-1);
     border: 1px solid var(--line);
     border-radius: var(--radius);
-    padding: 8px 12px;
+    padding: 10px 12px;
     margin: 12px 0;
     box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
   .header-row {
     display: flex;
@@ -132,7 +145,7 @@
     letter-spacing: 0.02em;
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
   }
   .port-num {
     font-family: var(--font-num);
@@ -140,29 +153,58 @@
     color: var(--text-2);
     letter-spacing: 0;
   }
+  .status-right {
+    flex-shrink: 0;
+  }
   .injected-tag {
-    font-size: 9px;
-    padding: 1px 4px;
-    border-radius: 2px;
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    font-size: 9.5px;
+    padding: 1.5px 5px;
+    border-radius: 3px;
+    background: var(--bg-2);
+    color: var(--text-2);
+    border: 1px solid var(--line);
     font-weight: 500;
     white-space: nowrap;
+    transition: all 0.15s ease;
   }
-  .actions {
+  .injected-tag.active {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  .desc-row {
+    margin: 0;
+  }
+  .desc-text {
+    margin: 0;
+    font-size: 10.5px;
+    line-height: 1.45;
+    color: var(--text-2);
+  }
+  .meta-row {
+    font-size: 10px;
+    color: var(--text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .upstream-label {
+    opacity: 0.85;
+  }
+  .actions-row {
     display: flex;
     align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 2px;
   }
   .action-btn {
     appearance: none;
     background: var(--bg-2);
     border: 1px solid var(--line-strong);
     color: var(--text-2);
-    font-size: 10px;
-    padding: 3px 8px;
+    font-size: 10.5px;
+    padding: 3.5px 9px;
     border-radius: var(--radius);
     cursor: pointer;
     white-space: nowrap;
@@ -179,16 +221,5 @@
   .action-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-  }
-  .meta-row {
-    margin-top: 4px;
-    font-size: 10px;
-    color: var(--text-2);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .upstream-label {
-    opacity: 0.85;
   }
 </style>

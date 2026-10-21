@@ -41,13 +41,14 @@ pub enum Range {
 }
 
 /// 托盘指标（设计文档「四指标可配」：总 / 输入 / 缓存读取 / 输出）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrayMetric {
     Total,
     Input,
     CacheRead,
     Output,
+    CacheRate,
 }
 
 /// 四项 token + 总和（契约 `totals` / `ProfileCard.tokens` 形状）
@@ -140,12 +141,26 @@ pub struct Dashboard {
     pub sessions: Vec<SessionRow>,
 }
 /// 桌面角落 HUD 紧凑概览数据（< 1ms 轻量查询）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct HudSummary {
     /// 今日累计总 Token
     pub total_today: i64,
-    /// 最近 5 分钟平均燃烧速率（tokens/min）
+    /// 平均燃烧速率（tokens/min，兼容老字段）
     pub rate_per_min: i64,
+    /// 当前瞬时生成速率（tokens/s）
+    pub current_rate: f64,
+    /// 激活会话累计总 Token
+    pub session_total: i64,
+    /// 激活会话当前模型
+    pub current_model: String,
+    /// 缓存命中率（0.0 - 100.0%）
+    pub cache_rate: f64,
+    /// 激活会话输入 Token 数
+    pub input_tokens: i64,
+    /// 激活会话输出 Token 数
+    pub output_tokens: i64,
+    /// 当前启用的指标键名列表
+    pub hud_metrics: Vec<String>,
     /// 鼠标穿透锁定状态
     pub hud_locked: bool,
 }
@@ -304,7 +319,6 @@ pub fn tray_metric(store: &Store, metric: TrayMetric) -> Result<i64, CoreError> 
 pub fn tray_metric_at(store: &Store, metric: TrayMetric, now_ms: i64) -> Result<i64, CoreError> {
     let today = local_date_at(store, now_ms)?;
     let (start_ms, end_ms) = store.local_day_bounds(&today)?;
-    let expr = metric_expr(metric);
 
     // 并行多会话：全局最近一条记录所属会话即激活会话（不求和）
     let latest: Option<(String, i64)> = store
@@ -317,6 +331,36 @@ pub fn tray_metric_at(store: &Store, metric: TrayMetric, now_ms: i64) -> Result<
         )
         .optional()?;
 
+    if metric == TrayMetric::CacheRate {
+        let (input, cache_read): (i64, i64) = match latest {
+            Some((session_id, ts_ms)) if ts_ms >= now_ms - ACTIVE_WINDOW_MS => {
+                store.conn().query_row(
+                    "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_read_tokens), 0)
+                     FROM usage_records
+                     WHERE session_id = ?1 AND timestamp_ms >= ?2 AND timestamp_ms < ?3",
+                    params![session_id, start_ms, end_ms],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?
+            }
+            _ => {
+                store.conn().query_row(
+                    "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_read_tokens), 0)
+                     FROM usage_records
+                     WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2",
+                    params![start_ms, end_ms],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?
+            }
+        };
+        let denom = input + cache_read;
+        return if denom > 0 {
+            Ok((cache_read * 100) / denom)
+        } else {
+            Ok(0)
+        };
+    }
+
+    let expr = metric_expr(metric);
     let value: i64 = match latest {
         Some((session_id, ts_ms)) if ts_ms >= now_ms - ACTIVE_WINDOW_MS => store.conn().query_row(
             &format!(
@@ -339,28 +383,134 @@ pub fn tray_metric_at(store: &Store, metric: TrayMetric, now_ms: i64) -> Result<
 }
 
 /// HUD 紧凑数据（使用系统当前时间）
-pub fn hud_summary(store: &Store, hud_locked: bool) -> Result<HudSummary, CoreError> {
-    hud_summary_at(store, hud_locked, now_ms())
+pub fn hud_summary(
+    store: &Store,
+    hud_locked: bool,
+    hud_metrics: &[String],
+) -> Result<HudSummary, CoreError> {
+    hud_summary_with_metrics_at(store, hud_locked, hud_metrics, now_ms())
 }
 
-/// HUD 紧凑数据（纯函数，指定时间点便于测试）
+/// HUD 紧凑数据（纯函数，指定时间点便于测试，采用默认指标）
 pub fn hud_summary_at(
     store: &Store,
     hud_locked: bool,
     now_ms: i64,
 ) -> Result<HudSummary, CoreError> {
+    hud_summary_with_metrics_at(store, hud_locked, &crate::app_settings::default_hud_metrics(), now_ms)
+}
+
+/// HUD 紧凑数据（带指标列表定制）
+pub fn hud_summary_with_metrics_at(
+    store: &Store,
+    hud_locked: bool,
+    hud_metrics: &[String],
+    now_ms: i64,
+) -> Result<HudSummary, CoreError> {
     let today = local_date_at(store, now_ms)?;
     let (start_ms, end_ms) = store.local_day_bounds(&today)?;
     let total_today = token_totals(store.totals_between(start_ms, end_ms)?).total;
+
+    // 1. 查询最近活跃的会话及其聚合数据与模型
+    let active_session_row = {
+        let mut stmt = store.conn().prepare_cached(
+            "SELECT session_id,
+                    MAX(timestamp_ms) AS last_ts,
+                    model,
+                    SUM(input_tokens),
+                    SUM(output_tokens),
+                    SUM(cache_read_tokens),
+                    SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens)
+             FROM usage_records
+             WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2
+             GROUP BY session_id
+             ORDER BY last_ts DESC
+             LIMIT 1",
+        )?;
+        stmt
+            .query_row(params![start_ms, end_ms], |row| {
+                let session_id: String = row.get(0)?;
+                let last_ts: i64 = row.get(1)?;
+                let model: String = row.get(2)?;
+                let input: i64 = row.get(3)?;
+                let output: i64 = row.get(4)?;
+                let cache_read: i64 = row.get(5)?;
+                let total: i64 = row.get(6)?;
+                Ok((session_id, last_ts, model, input, output, cache_read, total))
+            })
+            .ok()
+    };
+
+    let (session_total, current_model, cache_rate, input_tokens, output_tokens, last_active_ts) =
+        if let Some((_, last_ts, model, input, output, cache_read, total)) = active_session_row {
+            let denom = input + cache_read;
+            let cr = if denom > 0 {
+                (cache_read as f64 / denom as f64) * 100.0
+            } else {
+                0.0
+            };
+            (total, model, cr, input, output, last_ts)
+        } else {
+            (0, "—".to_string(), 0.0, 0, 0, 0)
+        };
+
+    // 2. 燃烧速率 (rate_per_min) 保持 5 分钟总窗口平均（契约兼容）：
     let five_min_ago = now_ms - ACTIVE_WINDOW_MS;
     let sum_5m = token_totals(store.totals_between(five_min_ago, now_ms + 1)?).total;
     let rate_per_min = (sum_5m / 5).max(0);
+
+    // 3. 瞬时生成速率 (current_rate, tokens/s)：
+    // 仅基于活跃窗口（≤ 30s）内的 output_tokens 输出量与耗时计算，绝不掺入巨大的输入/缓存读取量。
+    let is_active = last_active_ts > 0 && (now_ms - last_active_ts) <= 30_000;
+    let current_rate = if is_active {
+        let window_start = now_ms - 30_000;
+        let mut stmt = store.conn().prepare_cached(
+            "SELECT timestamp_ms, output_tokens FROM usage_records
+             WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
+             ORDER BY timestamp_ms ASC",
+        )?;
+        let records = stmt
+            .query_map(params![window_start, now_ms + 1000], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if records.is_empty() {
+            0.0
+        } else {
+            let total_out: i64 = records.iter().map(|(_, out)| *out).sum();
+            let first_ts = records.first().unwrap().0;
+            let last_ts = records.last().unwrap().0;
+            let time_span_s = if records.len() > 1 && (last_ts - first_ts) >= 1000 {
+                (last_ts - first_ts) as f64 / 1000.0
+            } else {
+                let elapsed = (now_ms - last_ts).max(1000) as f64 / 1000.0;
+                elapsed.min(10.0)
+            };
+            if time_span_s > 0.0 {
+                (total_out as f64 / time_span_s).max(0.0)
+            } else {
+                0.0
+            }
+        }
+    } else {
+        0.0
+    };
+
     Ok(HudSummary {
         total_today,
         rate_per_min,
+        current_rate,
+        session_total,
+        current_model,
+        cache_rate,
+        input_tokens,
+        output_tokens,
+        hud_metrics: hud_metrics.to_vec(),
         hud_locked,
     })
 }
+
 
 // ---------------------------------------------------------------------------
 // 内部实现
@@ -703,6 +853,7 @@ fn metric_expr(metric: TrayMetric) -> &'static str {
         TrayMetric::Input => "input_tokens",
         TrayMetric::CacheRead => "cache_read_tokens",
         TrayMetric::Output => "output_tokens",
+        TrayMetric::CacheRate => "0",
     }
 }
 

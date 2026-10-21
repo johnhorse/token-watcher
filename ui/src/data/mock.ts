@@ -652,7 +652,14 @@ export function createMockAdapter(): UiAdapter {
     async getHudSummary() {
       return {
         total_today: 359420 + liveTotal(),
-        rate_per_min: 14200,
+        rate_per_min: 3600,
+        current_rate: 68.5,
+        session_total: 48500,
+        current_model: "claude-sonnet",
+        cache_rate: 88.2,
+        input_tokens: 12400,
+        output_tokens: 3200,
+        hud_metrics: ["current_rate", "session_total", "cache_rate"],
         hud_locked: false,
       };
     },
@@ -660,6 +667,8 @@ export function createMockAdapter(): UiAdapter {
     async setHudLocked() {},
     async saveHudPosition() {},
     async showMainWindow() {},
+    async moveHudBy() {},
+    async saveCurrentHudPosition() {},
     async getTheme() {
       return currentTheme;
     },
@@ -680,6 +689,14 @@ export function createMockAdapter(): UiAdapter {
       return buildMockFlightRecorder(sessionId, limit);
     },
     onSessionFlightUpdated() {
+      return () => {};
+    },
+    async showHudContextMenu() {},
+    async toggleHudMetric(metric: string) {
+      return ["current_rate", "session_total", "cache_rate"];
+    },
+    async resizeHud() {},
+    onHudUpdated(cb) {
       return () => {};
     },
 

@@ -165,6 +165,13 @@ export interface ProxyStatus {
 export interface HudSummary {
   total_today: number;
   rate_per_min: number;
+  current_rate: number;
+  session_total: number;
+  current_model: string;
+  cache_rate: number;
+  input_tokens: number;
+  output_tokens: number;
+  hud_metrics: string[];
   hud_locked: boolean;
 }
 
@@ -204,11 +211,17 @@ export interface UiAdapter {
   setHudLocked(locked: boolean): Promise<void>;
   saveHudPosition(x: number, y: number): Promise<void>;
   showMainWindow(): Promise<void>;
+  moveHudBy(dx: number, dy: number): Promise<void>;
+  saveCurrentHudPosition(): Promise<void>;
   getTheme(): Promise<string>;
   setTheme(theme: string): Promise<void>;
   onThemeChanged(cb: (theme: string) => void): Unsubscribe;
   getSessionFlightRecorder(sessionId: string, limit?: number): Promise<SessionFlightRecorder | null>;
   onSessionFlightUpdated?: (cb: (payload: { session_id: string }) => void) => Unsubscribe;
+  showHudContextMenu(): Promise<void>;
+  toggleHudMetric(metric: string): Promise<string[]>;
+  resizeHud(width: number): Promise<void>;
+  onHudUpdated?: (cb: () => void) => Unsubscribe;
 
   onPulse(cb: (pulse: UsagePulse) => void): Unsubscribe;
   onScanProgress(cb: (status: ScanStatus) => void): Unsubscribe;

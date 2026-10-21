@@ -36,6 +36,7 @@ const ID_TOTAL: &str = "metric-total";
 const ID_INPUT: &str = "metric-input";
 const ID_CACHE_READ: &str = "metric-cache-read";
 const ID_OUTPUT: &str = "metric-output";
+const ID_CACHE_RATE: &str = "metric-cache-rate";
 const ID_TOGGLE_WINDOW: &str = "toggle-window";
 const ID_QUIT: &str = "quit";
 const ID_HUD_VISIBLE: &str = "hud-visible";
@@ -45,6 +46,7 @@ const ID_HUD_LOCKED: &str = "hud-locked";
 pub enum TrayCommand {
     DataChanged,
     MetricChanged(TrayMetric),
+    MetricsChanged(Vec<TrayMetric>),
 }
 
 /// 一次刷新的显示内容（纯函数计算结果，便于单测）
@@ -86,24 +88,26 @@ impl Lang {
             (Lang::Zh, TrayMetric::Input) => "输入 Token",
             (Lang::Zh, TrayMetric::CacheRead) => "缓存读取 Token",
             (Lang::Zh, TrayMetric::Output) => "输出 Token",
+            (Lang::Zh, TrayMetric::CacheRate) => "缓存率",
             (Lang::En, TrayMetric::Total) => "Total Tokens",
             (Lang::En, TrayMetric::Input) => "Input Tokens",
             (Lang::En, TrayMetric::CacheRead) => "Cache Read Tokens",
             (Lang::En, TrayMetric::Output) => "Output Tokens",
+            (Lang::En, TrayMetric::CacheRate) => "Cache Rate",
         }
     }
 
-    fn show_window(self) -> &'static str {
+    pub fn show_window(self) -> &'static str {
         match self {
-            Lang::Zh => "显示悬浮窗",
-            Lang::En => "Show Window",
+            Lang::Zh => "显示主面板",
+            Lang::En => "Show Main Window",
         }
     }
 
-    fn hide_window(self) -> &'static str {
+    pub fn hide_window(self) -> &'static str {
         match self {
-            Lang::Zh => "隐藏悬浮窗",
-            Lang::En => "Hide Window",
+            Lang::Zh => "隐藏主面板",
+            Lang::En => "Hide Main Window",
         }
     }
 
@@ -129,13 +133,45 @@ impl Lang {
     }
 }
 
-/// 计算显示内容：value 为聚合层返回值（非负）
-pub fn display(lang: Lang, metric: TrayMetric, value: i64) -> TrayDisplay {
+/// 单指标显示内容格式化
+pub fn display_metric(lang: Lang, metric: TrayMetric, value: i64) -> (Option<String>, String) {
     let value = value.max(0);
-    TrayDisplay {
-        title: (value > 0).then(|| compact_number(value)),
-        tooltip: format!("{}: {}", lang.metric_label(metric), full_number(value)),
+    let title_part = if metric == TrayMetric::CacheRate {
+        (value > 0).then(|| format!("{value}%"))
+    } else {
+        (value > 0).then(|| compact_number(value))
+    };
+    let tooltip_part = if metric == TrayMetric::CacheRate {
+        format!("{}: {}%", lang.metric_label(metric), value)
+    } else {
+        format!("{}: {}", lang.metric_label(metric), full_number(value))
+    };
+    (title_part, tooltip_part)
+}
+
+/// 多指标显示内容（1-2 个指标，用 " • " 隔开）
+pub fn display_multi(lang: Lang, metrics: &[TrayMetric], values: &[i64]) -> TrayDisplay {
+    let mut titles = Vec::new();
+    let mut tooltips = Vec::new();
+    for (m, v) in metrics.iter().zip(values.iter()) {
+        let (t, tip) = display_metric(lang, *m, *v);
+        if let Some(t_str) = t {
+            titles.push(t_str);
+        }
+        tooltips.push(tip);
     }
+    let title = if titles.is_empty() {
+        None
+    } else {
+        Some(titles.join(" • "))
+    };
+    let tooltip = tooltips.join(" • ");
+    TrayDisplay { title, tooltip }
+}
+
+/// 计算单指标显示内容：兼容原单测
+pub fn display(lang: Lang, metric: TrayMetric, value: i64) -> TrayDisplay {
+    display_multi(lang, &[metric], &[value])
 }
 
 /// 菜单栏紧凑数字：999 / 1.2K / 184K / 1.2M / 12M / 1.2B
@@ -187,6 +223,7 @@ fn metric_id(metric: TrayMetric) -> &'static str {
         TrayMetric::Input => ID_INPUT,
         TrayMetric::CacheRead => ID_CACHE_READ,
         TrayMetric::Output => ID_OUTPUT,
+        TrayMetric::CacheRate => ID_CACHE_RATE,
     }
 }
 
@@ -196,6 +233,7 @@ fn metric_from_id(id: &str) -> Option<TrayMetric> {
         ID_INPUT => Some(TrayMetric::Input),
         ID_CACHE_READ => Some(TrayMetric::CacheRead),
         ID_OUTPUT => Some(TrayMetric::Output),
+        ID_CACHE_RATE => Some(TrayMetric::CacheRate),
         _ => None,
     }
 }
@@ -223,7 +261,8 @@ pub fn setup(
     })?;
 
     let lang = detect_lang();
-    let metric_items = build_metric_items(app, initial_settings.tray_metric, lang)?;
+    let initial_metrics = initial_settings.effective_tray_metrics();
+    let metric_items = build_metric_items(app, &initial_metrics, lang)?;
     let hud_visible_item = CheckMenuItem::with_id(
         app,
         ID_HUD_VISIBLE,
@@ -301,13 +340,27 @@ pub fn setup(
     tray.on_menu_event(move |app, event| {
         let id = event.id().as_ref();
         if let Some(metric) = metric_from_id(id) {
-            set_checked(&menu_items, metric);
             let mut settings = AppSettings::load(&settings_path);
-            settings.tray_metric = metric;
+            let mut current = settings.effective_tray_metrics();
+            if current.contains(&metric) {
+                // 最少选择 1 个
+                if current.len() > 1 {
+                    current.retain(|m| *m != metric);
+                }
+            } else {
+                // 最多选择 2 个：已选 2 个时替换掉最早选中的
+                if current.len() >= 2 {
+                    current.remove(0);
+                }
+                current.push(metric);
+            }
+            settings.tray_metrics = current.clone();
+            settings.tray_metric = current.first().copied().unwrap_or(TrayMetric::Total);
             if let Err(e) = settings.save(&settings_path) {
                 eprintln!("[token-watcher] 保存托盘指标设置失败: {e}");
             }
-            let _ = menu_tx.send(TrayCommand::MetricChanged(metric));
+            set_checked(&menu_items, &current);
+            let _ = menu_tx.send(TrayCommand::MetricsChanged(current));
         } else if id == ID_HUD_VISIBLE {
             let mut settings = AppSettings::load(&settings_path);
             settings.hud_visible = !settings.hud_visible;
@@ -338,7 +391,7 @@ pub fn setup(
     spawn_refresher(
         tray,
         db_path.to_path_buf(),
-        initial_settings.tray_metric,
+        initial_metrics,
         lang,
         rx,
     );
@@ -347,14 +400,15 @@ pub fn setup(
 
 fn build_metric_items(
     app: &AppHandle,
-    current: TrayMetric,
+    current: &[TrayMetric],
     lang: Lang,
 ) -> tauri::Result<Vec<(TrayMetric, CheckMenuItem<Wry>)>> {
-    const METRICS: [TrayMetric; 4] = [
+    const METRICS: [TrayMetric; 5] = [
         TrayMetric::Total,
         TrayMetric::Input,
         TrayMetric::CacheRead,
         TrayMetric::Output,
+        TrayMetric::CacheRate,
     ];
     METRICS
         .into_iter()
@@ -364,7 +418,7 @@ fn build_metric_items(
                 metric_id(metric),
                 lang.metric_label(metric),
                 true,
-                metric == current,
+                current.contains(&metric),
                 None::<&str>,
             )?;
             Ok((metric, item))
@@ -372,46 +426,46 @@ fn build_metric_items(
         .collect()
 }
 
-fn set_checked(items: &[(TrayMetric, CheckMenuItem<Wry>)], current: TrayMetric) {
+fn set_checked(items: &[(TrayMetric, CheckMenuItem<Wry>)], current: &[TrayMetric]) {
     for (metric, item) in items {
-        let _ = item.set_checked(*metric == current);
+        let _ = item.set_checked(current.contains(metric));
     }
 }
-
 /// 显示并聚焦主窗。**必须 set_focus**：T3/T4 的水合信号依赖
 /// `WindowEvent::Focused(true)`（只 show 不 focus 会让 UI 等下一个数据事件）。
 fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
-    sync_window_item_label(app);
+    let _ = crate::hud::show_main_window(app);
 }
 
 fn toggle_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };
-    if window.is_visible().unwrap_or(false) {
+    let is_visible = window.is_visible().unwrap_or(false);
+    let is_minimized = window.is_minimized().unwrap_or(false);
+    if is_visible && !is_minimized {
         let _ = window.hide();
+        #[cfg(target_os = "macos")]
+        {
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        }
         sync_window_item_label(app);
     } else {
         show_main_window(app);
     }
 }
 
-/// 同步「显示/隐藏悬浮窗」文案。窗口也可能被菜单以外的路径显示
+/// 同步「显示/隐藏主面板」文案。窗口也可能被菜单以外的路径显示
 /// （single-instance 唤起 → lib.rs 的 Focused 事件），因此单独暴露。
 pub fn sync_window_item_label(app: &AppHandle) {
     let (Some(item), Some(lang)) = (WINDOW_ITEM.get(), LANG.get()) else {
         return;
     };
-    let visible = app
+    let is_active = app
         .get_webview_window(WINDOW_LABEL)
-        .and_then(|w| w.is_visible().ok())
+        .map(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
         .unwrap_or(false);
-    let text = if visible {
+    let text = if is_active {
         lang.hide_window()
     } else {
         lang.show_window()
@@ -434,7 +488,7 @@ pub fn sync_hud_menu_items(_app: &AppHandle, settings: &AppSettings) {
 fn spawn_refresher(
     tray: TrayIcon<Wry>,
     db_path: PathBuf,
-    mut metric: TrayMetric,
+    mut metrics: Vec<TrayMetric>,
     lang: Lang,
     rx: Receiver<TrayCommand>,
 ) {
@@ -442,9 +496,6 @@ fn spawn_refresher(
         .name("token-watcher-tray".into())
         .spawn(move || {
             let mut store: Option<Store> = None;
-            // 不在启动瞬间查库：数据线程首次 Store::open 会跑 migration，
-            // 两个连接同时迁移会撞 "duplicate column"。等首个 DataChanged
-            // （首扫完成即发）或 60s 兜底 tick 后再开只读侧连接。
             let mut last = Instant::now();
             let mut first = true;
             let mut pending = false;
@@ -452,12 +503,10 @@ fn spawn_refresher(
             loop {
                 let now = Instant::now();
                 let elapsed = now.duration_since(last);
-                // 首次落库通知立即显示（冷启动不被 30s 合并窗口拖慢）；
-                // 之后：菜单切换强制立即刷新，其余按合并窗口/兜底 tick 节流。
                 let due_now =
                     force || elapsed >= TICK || (pending && (first || elapsed >= MIN_INTERVAL));
                 if due_now {
-                    refresh(&tray, &db_path, metric, lang, &mut store);
+                    refresh(&tray, &db_path, &metrics, lang, &mut store);
                     last = Instant::now();
                     first = false;
                     pending = false;
@@ -472,8 +521,12 @@ fn spawn_refresher(
                 match rx.recv_timeout(due.saturating_duration_since(now)) {
                     Ok(TrayCommand::DataChanged) => pending = true,
                     Ok(TrayCommand::MetricChanged(m)) => {
-                        metric = m;
-                        force = true; // 菜单切换立即刷新，不受合并窗口限制
+                        metrics = vec![m];
+                        force = true;
+                    }
+                    Ok(TrayCommand::MetricsChanged(ms)) => {
+                        metrics = ms;
+                        force = true;
                     }
                     Err(RecvTimeoutError::Timeout) => pending = true,
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -488,7 +541,7 @@ fn spawn_refresher(
 fn refresh(
     tray: &TrayIcon<Wry>,
     db_path: &Path,
-    metric: TrayMetric,
+    metrics: &[TrayMetric],
     lang: Lang,
     store: &mut Option<Store>,
 ) {
@@ -501,25 +554,28 @@ fn refresh(
             }
         }
     }
-    let result = store.as_ref().map(|db| agg::tray_metric(db, metric));
-    let value = match result {
-        Some(Ok(value)) => value,
-        Some(Err(e)) => {
-            eprintln!("[token-watcher] 托盘聚合查询失败（下次重建连接）: {e}");
-            *store = None;
-            return;
-        }
-        None => return,
+    let Some(db) = store.as_ref() else {
+        return;
     };
+    let mut values = Vec::new();
+    for &m in metrics {
+        match agg::tray_metric(db, m) {
+            Ok(v) => values.push(v),
+            Err(e) => {
+                eprintln!("[token-watcher] 托盘聚合查询失败（下次重建连接）: {e}");
+                *store = None;
+                return;
+            }
+        }
+    }
 
-    let shown = display(lang, metric, value);
-    // Windows 不支持 tray title：数字只进 tooltip（静态图标方案）
+    let shown = display_multi(lang, metrics, &values);
     if cfg!(target_os = "macos") {
         let _ = tray.set_title(shown.title.as_deref());
     }
     let _ = tray.set_tooltip(Some(&shown.tooltip));
     eprintln!(
-        "[token-watcher] 托盘刷新: metric={metric:?} value={value} title={:?} tooltip={:?}",
+        "[token-watcher] 托盘刷新: metrics={metrics:?} values={values:?} title={:?} tooltip={:?}",
         shown.title, shown.tooltip
     );
 }

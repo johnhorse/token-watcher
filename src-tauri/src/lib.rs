@@ -69,11 +69,7 @@ pub fn run() {
     let result = tauri::Builder::default()
         // D15：必须第一个注册；第二实例在此唤起主窗并退出，不会走到 setup
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window(watch::WINDOW_LABEL) {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+            let _ = hud::show_main_window(app);
         }))
         .setup(move |app| {
             // 写者锁（F5）：single-instance 已拦住同 app 的第二实例，
@@ -103,9 +99,37 @@ pub fn run() {
             };
             let db_path = paths.db_path.clone();
             let claude_settings_path = paths.settings_path.clone();
+            let data_dir = db_path.parent().unwrap_or(std::path::Path::new("."));
+            let pricing = std::sync::Arc::new(core::pricing::PriceManager::new(data_dir));
+            pricing.clone().spawn_background_refresher(Some(app.handle().clone()));
+            let quota_syncer = std::sync::Arc::new(core::quota::QuotaSyncer::new(
+                db_path.clone(),
+                claude_settings_path.clone(),
+            ));
+
+            // 尽早注入 AppState：确保 watch::spawn / tray / proxy 等后台线程在启动首秒内
+            // 均能可靠通过 app.try_state::<AppState>() 立即同步状态，杜绝任何因时序滞后导致状态丢失！
+            app.manage(AppState {
+                _lock: Mutex::new(Some(lock)),
+                data: Mutex::new(None),
+                status: Mutex::new(ScanPublicStatus::default()),
+                store: Mutex::new(None),
+                db_path: db_path.clone(),
+                proxy: Mutex::new(None),
+                pricing: pricing.clone(),
+                quota_syncer: quota_syncer.clone(),
+            });
+
             let data = watch::spawn(app.handle().clone(), paths, tray_tx);
+            let data_sender = data.sender();
+            if let Some(state) = app.try_state::<AppState>() {
+                if let Ok(mut guard) = state.data.lock() {
+                    *guard = Some(data);
+                }
+            }
+
             let proxy_state = match tauri::async_runtime::block_on(proxy::start_proxy_server(
-                data.sender(),
+                data_sender,
                 claude_settings_path.clone(),
                 proxy::DEFAULT_PORT,
             )) {
@@ -121,6 +145,13 @@ pub fn run() {
                     None
                 }
             };
+
+            if let Some(state) = app.try_state::<AppState>() {
+                if let Ok(mut guard) = state.proxy.lock() {
+                    *guard = proxy_state;
+                }
+            }
+
             if settings.hud_visible {
                 if let Err(e) = hud::ensure_hud_window(
                     app.handle(),
@@ -132,19 +163,12 @@ pub fn run() {
                     eprintln!("[token-watcher] HUD 窗口恢复失败: {e}");
                 }
             }
-            let data_dir = db_path.parent().unwrap_or(std::path::Path::new("."));
-            let pricing = std::sync::Arc::new(core::pricing::PriceManager::new(data_dir));
-            pricing.clone().spawn_background_refresher(Some(app.handle().clone()));
-            let quota_syncer = std::sync::Arc::new(core::quota::QuotaSyncer::new(
-                db_path.clone(),
-                claude_settings_path.clone(),
-            ));
-            // 启动后台 QuotaSyncer 定时轮询（每 10 分钟轮询一次所有 API 档案，等待首扫完成）
+
+            // 启动后台 QuotaSyncer 定时轮询
             {
                 let syncer = quota_syncer.clone();
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    // 等待首扫完成
                     loop {
                         tokio::time::sleep(Duration::from_secs(3)).await;
                         if let Some(state) = app_handle.try_state::<AppState>() {
@@ -155,11 +179,9 @@ pub fn run() {
                             }
                         }
                     }
-                    // 首扫完成后首次拉取
                     syncer.sync_all_active_profiles().await;
                     let _ = app_handle.emit("dashboard-dirty", ());
 
-                    // 定时 10 分钟轮询
                     loop {
                         tokio::time::sleep(Duration::from_secs(600)).await;
                         syncer.sync_all_active_profiles().await;
@@ -167,16 +189,15 @@ pub fn run() {
                     }
                 });
             }
-            app.manage(AppState {
-                _lock: Mutex::new(Some(lock)),
-                data: Mutex::new(Some(data)),
-                status: Mutex::new(ScanPublicStatus::default()),
-                store: Mutex::new(None),
-                db_path,
-                proxy: Mutex::new(proxy_state),
-                pricing,
-                quota_syncer,
-            });
+            if let Some(win) = app.get_webview_window(watch::WINDOW_LABEL) {
+                #[cfg(target_os = "macos")]
+                {
+                    app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                }
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -194,9 +215,47 @@ pub fn run() {
             WindowEvent::CloseRequested { api, .. } if window.label() == watch::WINDOW_LABEL => {
                 api.prevent_close();
                 let _ = window.hide();
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = window
+                        .app_handle()
+                        .set_activation_policy(tauri::ActivationPolicy::Accessory);
+                }
                 tray::sync_window_item_label(window.app_handle());
             }
             _ => {}
+        })
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref();
+            if let Some(metric_id) = id.strip_prefix("hud-metric-") {
+                if let Some(state) = app.try_state::<AppState>() {
+                    let settings_path = app_settings::path_for_db(&state.db_path);
+                    let mut settings = AppSettings::load(&settings_path);
+                    let mut current = settings.effective_hud_metrics();
+                    if current.contains(&metric_id.to_string()) {
+                        if current.len() > 2 {
+                            current.retain(|m| m != metric_id);
+                        }
+                    } else {
+                        current.push(metric_id.to_string());
+                    }
+                    settings.hud_metrics = current;
+                    let _ = settings.save(&settings_path);
+                    let _ = app.emit("hud-updated", ());
+                }
+            } else if id == "hud-toggle-lock" {
+                if let Some(state) = app.try_state::<AppState>() {
+                    let settings_path = app_settings::path_for_db(&state.db_path);
+                    let mut settings = AppSettings::load(&settings_path);
+                    settings.hud_locked = !settings.hud_locked;
+                    let _ = settings.save(&settings_path);
+                    if let Some(win) = app.get_webview_window(hud::HUD_LABEL) {
+                        let _ = hud::apply_hud_locked(&win, settings.hud_locked);
+                    }
+                    tray::sync_hud_menu_items(app, &settings);
+                    let _ = app.emit("hud-updated", ());
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_dashboard,
@@ -217,12 +276,26 @@ pub fn run() {
             commands::sync_profile_quota,
             commands::get_theme,
             commands::set_theme,
+            commands::move_hud_by,
+            commands::save_current_hud_position,
+            commands::resize_hud,
+            commands::show_hud_context_menu,
+            commands::toggle_hud_metric,
+            commands::log_js_error,
         ])
         .build(tauri::generate_context!());
 
     match result {
-        Ok(app) => app.run(|app_handle, event| {
-            if matches!(event, RunEvent::Exit) {
+        Ok(app) => app.run(|app_handle, event| match event {
+            RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } => {
+                if !has_visible_windows {
+                    let _ = hud::show_main_window(app_handle);
+                }
+            }
+            RunEvent::Exit => {
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     if let Ok(guard) = state.proxy.lock() {
                         if let Some(proxy_st) = guard.as_ref() {
@@ -239,6 +312,7 @@ pub fn run() {
                     }
                 }
             }
+            _ => {}
         }),
         Err(e) => {
             eprintln!("[token-watcher] 启动失败: {e}");
