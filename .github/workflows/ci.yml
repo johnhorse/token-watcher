@@ -17,6 +17,7 @@ env:
 jobs:
   ui:
     name: UI build
+    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release)')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +38,7 @@ jobs:
 
   rust:
     name: Rust checks (${{ matrix.os }})
+    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release)')
     strategy:
       fail-fast: false
       matrix:
