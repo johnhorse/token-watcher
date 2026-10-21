@@ -29,8 +29,8 @@ const TRAY_ID: &str = "main";
 
 /// 兜底刷新周期：即使没有数据变化也每 60s 校准一次（SC2 上限）
 const TICK: Duration = Duration::from_secs(60);
-/// 通知合并窗口：距离上次刷新不足 30s 的数据变化合并成一次查询
-const MIN_INTERVAL: Duration = Duration::from_secs(30);
+/// 通知合并窗口：距离上次刷新不足 3s 的数据变化合并成一次查询
+const MIN_INTERVAL: Duration = Duration::from_secs(3);
 
 const ID_TOTAL: &str = "metric-total";
 const ID_INPUT: &str = "metric-input";
