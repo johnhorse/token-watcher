@@ -287,6 +287,7 @@ pub fn run() {
 
     match result {
         Ok(app) => app.run(|app_handle, event| match event {
+            #[cfg(target_os = "macos")]
             RunEvent::Reopen {
                 has_visible_windows,
                 ..
