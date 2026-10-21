@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use super::parse::{
-    extract_cline_model, parse_aider_line, parse_cline_roo_entries, parse_codex_line, parse_line,
+    extract_cline_model, parse_aider_line, parse_cline_roo_entries, parse_codex_line,
+    parse_continue_session, parse_line, parse_omp_line, parse_opencode_message,
     AiderSessionTracker, CodexFileState, ParsedLine, UsageRecord,
 };
 use super::store::{Checkpoint, Store};
@@ -58,13 +59,22 @@ pub enum FileEngineKind {
     Cline,
     RooCode,
     Aider,
+    OpenCode,
+    Continue,
+    Omp,
 }
 
 /// 依据文件名及内容抽样自动判定文件所属引擎
 pub fn detect_file_kind(path: &Path, sample_bytes: &[u8]) -> FileEngineKind {
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let path_str = path.to_string_lossy();
+    if filename == "opencode.db" || (filename.ends_with(".db") && path_str.contains("opencode")) {
+        return FileEngineKind::OpenCode;
+    }
+    if filename.ends_with(".json") && (path_str.contains(".continue") || path_str.contains("continue")) {
+        return FileEngineKind::Continue;
+    }
     if filename == "ui_messages.json" {
-        let path_str = path.to_string_lossy();
         if path_str.contains("roo-cline")
             || path_str.contains("rooveterinaryinc")
             || path_str.contains("roo_tasks")
@@ -78,6 +88,15 @@ pub fn detect_file_kind(path: &Path, sample_bytes: &[u8]) -> FileEngineKind {
     }
     if filename.contains("aider") || sample_bytes.windows(14).any(|w| w == b"\"message_send\"") {
         return FileEngineKind::Aider;
+    }
+    if path_str.contains(".omp")
+        || path_str.contains("/omp/")
+        || path_str.contains("\\omp\\")
+        || path_str.contains("/omp_")
+        || path_str.contains("\\omp_")
+        || path_str.contains("omp_sessions")
+    {
+        return FileEngineKind::Omp;
     }
     if filename.starts_with("rollout-") && filename.ends_with(".jsonl") {
         return FileEngineKind::CodexCli;
@@ -201,6 +220,95 @@ pub fn ingest_file_with_records(
         return Ok((stats, new_records));
     }
 
+    if engine_kind == FileEngineKind::OpenCode {
+        let previous_ts = store.get_checkpoint(&key)?.map(|c| c.byte_offset).unwrap_or(0);
+        let conn = match rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        ) {
+            Ok(c) => c,
+            Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
+        };
+        let _ = conn.execute_batch("PRAGMA query_only = ON;");
+        let mut stmt = match conn.prepare(
+            "SELECT m.id, m.session_id, m.time_created, m.data FROM message m WHERE m.time_created > ? ORDER BY m.time_created ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
+        };
+        let mut rows = match stmt.query(rusqlite::params![previous_ts]) {
+            Ok(r) => r,
+            Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
+        };
+        let mut records = Vec::new();
+        let mut max_ts = previous_ts;
+        while let Ok(Some(row)) = rows.next() {
+            let id: String = row.get(0).unwrap_or_default();
+            let session_id: String = row.get(1).unwrap_or_default();
+            let time_created: i64 = row.get(2).unwrap_or(0);
+            let data_json: String = row.get(3).unwrap_or_default();
+            if time_created > max_ts {
+                max_ts = time_created;
+            }
+            if let Some(record) = parse_opencode_message(&id, &session_id, time_created, &data_json) {
+                records.push(record);
+            }
+        }
+        if !records.is_empty() {
+            store.upsert_records(&records)?;
+        }
+        if max_ts > previous_ts {
+            store.set_checkpoint(
+                &key,
+                Checkpoint {
+                    byte_offset: max_ts,
+                    mtime_ms,
+                    size,
+                },
+            )?;
+        }
+        let stats = FileIngestStats {
+            records: records.len() as u64,
+            bad_lines: 0,
+            truncated: false,
+        };
+        return Ok((stats, records));
+    }
+
+    if engine_kind == FileEngineKind::Continue {
+        let is_same = store
+            .get_checkpoint(&key)?
+            .map(|c| c.mtime_ms == mtime_ms && c.size == size)
+            .unwrap_or(false);
+        if is_same {
+            return Ok((FileIngestStats::default(), Vec::new()));
+        }
+        let bytes = match fs::read(path) {
+            Ok(b) => b,
+            Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
+        };
+        let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("continue-session");
+        let records = match parse_continue_session(file_stem, &bytes) {
+            Ok(r) => r,
+            Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
+        };
+        store.upsert_records(&records)?;
+        store.set_checkpoint(
+            &key,
+            Checkpoint {
+                byte_offset: records.len() as i64,
+                mtime_ms,
+                size,
+            },
+        )?;
+        let stats = FileIngestStats {
+            records: records.len() as u64,
+            bad_lines: 0,
+            truncated: false,
+        };
+        return Ok((stats, records));
+    }
+
     let mut truncated = false;
     let mut offset = 0i64;
     if let Some(checkpoint) = store.get_checkpoint(&key)? {
@@ -239,11 +347,16 @@ pub fn ingest_file_with_records(
     for i in 0..buf.len() {
         if buf[i] == b'\n' {
             let line = &buf[line_start..i];
+            let omp_session_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("omp-session");
             let parsed = match engine_kind {
                 FileEngineKind::ClaudeCode => parse_line(line),
                 FileEngineKind::CodexCli => parse_codex_line(line, &mut codex_state),
                 FileEngineKind::Aider => parse_aider_line(line, &mut aider_tracker),
-                FileEngineKind::Cline | FileEngineKind::RooCode => ParsedLine::Ignored,
+                FileEngineKind::Omp => parse_omp_line(line, omp_session_id),
+                FileEngineKind::Cline
+                | FileEngineKind::RooCode
+                | FileEngineKind::OpenCode
+                | FileEngineKind::Continue => ParsedLine::Ignored,
             };
             match parsed {
                 ParsedLine::Record(record) => records.push(record),
@@ -259,11 +372,16 @@ pub fn ingest_file_with_records(
     // 解析失败 → 写入进行中的不完整尾行，不计数、不推进，下次重读拼接。
     let tail = &buf[line_start..];
     if !tail.is_empty() && serde_json::from_slice::<serde_json::Value>(tail).is_ok() {
+        let omp_session_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("omp-session");
         let parsed = match engine_kind {
             FileEngineKind::ClaudeCode => parse_line(tail),
             FileEngineKind::CodexCli => parse_codex_line(tail, &mut codex_state),
             FileEngineKind::Aider => parse_aider_line(tail, &mut aider_tracker),
-            FileEngineKind::Cline | FileEngineKind::RooCode => ParsedLine::Ignored,
+            FileEngineKind::Omp => parse_omp_line(tail, omp_session_id),
+            FileEngineKind::Cline
+            | FileEngineKind::RooCode
+            | FileEngineKind::OpenCode
+            | FileEngineKind::Continue => ParsedLine::Ignored,
         };
         match parsed {
             ParsedLine::Record(record) => records.push(record),
@@ -366,7 +484,10 @@ pub fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>, dirs_failed: &mu
         } else if metadata.is_file() {
             let is_jsonl = path.extension().and_then(|e| e.to_str()) == Some("jsonl");
             let is_ui_messages = path.file_name().and_then(|n| n.to_str()) == Some("ui_messages.json");
-            if is_jsonl || is_ui_messages {
+            let is_continue = path.extension().and_then(|e| e.to_str()) == Some("json")
+                && (path.to_string_lossy().contains(".continue") || path.to_string_lossy().contains("continue"));
+            let is_opencode = path.file_name().and_then(|n| n.to_str()) == Some("opencode.db");
+            if is_jsonl || is_ui_messages || is_continue || is_opencode {
                 out.push(path);
             }
         }

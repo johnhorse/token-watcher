@@ -874,7 +874,7 @@ fn session_title(session_id: &str, cwd: Option<&str>) -> String {
     }
 }
 
-/// 判断记录所属数据源引擎（`"claude"` | `"codex"` | `"cline"` | `"roo"` | `"aider"` | `"cursor"`）
+/// 判断记录所属数据源引擎（`"claude"` | `"codex"` | `"cline"` | `"roo"` | `"aider"` | `"cursor"` | `"opencode"` | `"continue"` | `"omp"`）
 pub fn detect_engine(record_id: &str, entrypoint: &str) -> &'static str {
     if record_id.starts_with("codex:") || entrypoint.starts_with("codex") {
         "codex"
@@ -886,6 +886,12 @@ pub fn detect_engine(record_id: &str, entrypoint: &str) -> &'static str {
         "aider"
     } else if record_id.starts_with("cursor:") || entrypoint.starts_with("cursor") {
         "cursor"
+    } else if record_id.starts_with("opencode:") || entrypoint.starts_with("opencode") {
+        "opencode"
+    } else if record_id.starts_with("continue:") || entrypoint.starts_with("continue") {
+        "continue"
+    } else if record_id.starts_with("omp:") || entrypoint.starts_with("omp") {
+        "omp"
     } else {
         "claude"
     }

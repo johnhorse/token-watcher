@@ -52,6 +52,9 @@ pub struct DataPaths {
     pub cline_tasks_root: PathBuf,
     pub roo_tasks_root: PathBuf,
     pub aider_analytics_path: PathBuf,
+    pub opencode_db_path: PathBuf,
+    pub continue_sessions_root: PathBuf,
+    pub omp_sessions_root: PathBuf,
     pub db_path: PathBuf,
 }
 
@@ -81,6 +84,22 @@ impl DataPaths {
             home.join(".aider.analytics.jsonl")
         };
 
+        #[cfg(target_os = "macos")]
+        let opencode_db_path = home.join(".local/share/opencode/opencode.db");
+        #[cfg(target_os = "windows")]
+        let opencode_db_path = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Local"))
+            .join("opencode/opencode.db");
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let opencode_db_path = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share"))
+            .join("opencode/opencode.db");
+
+        let continue_sessions_root = home.join(".continue/sessions");
+        let omp_sessions_root = home.join(".omp/agent/sessions");
+
         Ok(Self {
             projects_root: claude_dir.join("projects"),
             settings_path: claude_dir.join("settings.json"),
@@ -91,6 +110,9 @@ impl DataPaths {
             cline_tasks_root,
             roo_tasks_root,
             aider_analytics_path,
+            opencode_db_path,
+            continue_sessions_root,
+            omp_sessions_root,
             db_path: home.join(".token-watcher").join("db.sqlite3"),
         })
     }
@@ -108,6 +130,9 @@ impl DataPaths {
             cline_tasks_root: temp.join("cline_tasks"),
             roo_tasks_root: temp.join("roo_tasks"),
             aider_analytics_path: temp.join("aider.jsonl"),
+            opencode_db_path: temp.join("opencode.db"),
+            continue_sessions_root: temp.join("continue_sessions"),
+            omp_sessions_root: temp.join("omp_sessions"),
             db_path: temp.join("db.sqlite3"),
         }
     }
@@ -316,6 +341,9 @@ pub struct DataEngine<S: EventSink> {
     cline_tasks_watched: bool,
     roo_tasks_watched: bool,
     aider_watched: bool,
+    continue_sessions_watched: bool,
+    omp_sessions_watched: bool,
+    opencode_watched: bool,
     store: Option<Store>,
     /// 去抖批次中待 ingest 的 JSONL 文件
     pending_files: HashSet<PathBuf>,
@@ -365,6 +393,9 @@ impl<S: EventSink> DataEngine<S> {
         let mut cline_tasks_watched = false;
         let mut roo_tasks_watched = false;
         let mut aider_watched = false;
+        let mut continue_sessions_watched = false;
+        let mut omp_sessions_watched = false;
+        let mut opencode_watched = false;
         if let Some(w) = watcher.as_mut() {
             if paths.projects_root.exists() {
                 match w.watch(&paths.projects_root, RecursiveMode::Recursive) {
@@ -425,6 +456,34 @@ impl<S: EventSink> DataEngine<S> {
                     ),
                 }
             }
+            if paths.continue_sessions_root.exists() {
+                match w.watch(&paths.continue_sessions_root, RecursiveMode::Recursive) {
+                    Ok(()) => continue_sessions_watched = true,
+                    Err(e) => eprintln!(
+                        "[token-watcher] 监听 {} 失败: {e}",
+                        paths.continue_sessions_root.display()
+                    ),
+                }
+            }
+            if paths.omp_sessions_root.exists() {
+                match w.watch(&paths.omp_sessions_root, RecursiveMode::Recursive) {
+                    Ok(()) => omp_sessions_watched = true,
+                    Err(e) => eprintln!(
+                        "[token-watcher] 监听 {} 失败: {e}",
+                        paths.omp_sessions_root.display()
+                    ),
+                }
+            }
+            if paths.opencode_db_path.exists() {
+                let target = paths.opencode_db_path.parent().unwrap_or(&paths.opencode_db_path);
+                match w.watch(target, RecursiveMode::NonRecursive) {
+                    Ok(()) => opencode_watched = true,
+                    Err(e) => eprintln!(
+                        "[token-watcher] 监听 {} 失败: {e}",
+                        target.display()
+                    ),
+                }
+            }
         }
 
         let (store, health) = match Store::open(&paths.db_path) {
@@ -461,6 +520,9 @@ impl<S: EventSink> DataEngine<S> {
             cline_tasks_watched,
             roo_tasks_watched,
             aider_watched,
+            continue_sessions_watched,
+            omp_sessions_watched,
+            opencode_watched,
             store,
             pending_files: HashSet::new(),
             settings_dirty: false,
@@ -530,6 +592,8 @@ impl<S: EventSink> DataEngine<S> {
             &self.paths.codex_sessions_root,
             &self.paths.cline_tasks_root,
             &self.paths.roo_tasks_root,
+            &self.paths.continue_sessions_root,
+            &self.paths.omp_sessions_root,
         ]
         .into_iter()
         .filter(|p| p.exists())
@@ -541,8 +605,13 @@ impl<S: EventSink> DataEngine<S> {
         } else {
             None
         };
+        let opencode_file = if self.paths.opencode_db_path.is_file() {
+            Some(self.paths.opencode_db_path.clone())
+        } else {
+            None
+        };
 
-        if roots.is_empty() && aider_file.is_none() {
+        if roots.is_empty() && aider_file.is_none() && opencode_file.is_none() {
             self.health.root_unreadable = false;
             self.push_event("scan-progress", progress_json("empty", 0, 0));
             self.emit_dirty();
@@ -569,6 +638,9 @@ impl<S: EventSink> DataEngine<S> {
             ingest::collect_source_files(root, &mut all_files, &mut dirs_failed);
         }
         if let Some(f) = aider_file {
+            all_files.push(f);
+        }
+        if let Some(f) = opencode_file {
             all_files.push(f);
         }
         self.health.root_unreadable = any_root_unreadable;
@@ -812,7 +884,14 @@ impl<S: EventSink> DataEngine<S> {
         let mut relevant = false;
         for path in &event.paths {
             if self.is_source_event(path) {
-                self.pending_files.insert(path.clone());
+                if path == &self.paths.opencode_db_path
+                    || path.file_name().and_then(|n| n.to_str()) == Some("opencode.db")
+                    || path.file_name().and_then(|n| n.to_str()) == Some("opencode.db-wal")
+                {
+                    self.pending_files.insert(self.paths.opencode_db_path.clone());
+                } else {
+                    self.pending_files.insert(path.clone());
+                }
                 relevant = true;
             }
             if self.is_settings_event(path) || self.is_codex_config_event(path) {
@@ -847,6 +926,28 @@ impl<S: EventSink> DataEngine<S> {
             if !self.aider_watched
                 && path == &self.paths.aider_analytics_path
                 && self.try_watch_aider()
+            {
+                self.needs_catchup = true;
+                relevant = true;
+            }
+            if !self.continue_sessions_watched
+                && path.starts_with(&self.paths.continue_sessions_root)
+                && self.try_watch_continue_sessions()
+            {
+                self.needs_catchup = true;
+                relevant = true;
+            }
+            if !self.omp_sessions_watched
+                && path.starts_with(&self.paths.omp_sessions_root)
+                && self.try_watch_omp_sessions()
+            {
+                self.needs_catchup = true;
+                relevant = true;
+            }
+            if !self.opencode_watched
+                && (path == &self.paths.opencode_db_path
+                    || path.starts_with(self.paths.opencode_db_path.parent().unwrap_or(&self.paths.opencode_db_path)))
+                && self.try_watch_opencode()
             {
                 self.needs_catchup = true;
                 relevant = true;
@@ -906,7 +1007,6 @@ impl<S: EventSink> DataEngine<S> {
             _ => false,
         }
     }
-
     fn is_roo_tasks_root(&self, path: &Path) -> bool {
         if path == self.paths.roo_tasks_root {
             return true;
@@ -917,14 +1017,30 @@ impl<S: EventSink> DataEngine<S> {
         }
     }
 
+
+    fn under_omp(&self, path: &Path) -> bool {
+        path.starts_with(&self.paths.omp_sessions_root)
+    }
+
+    fn under_continue(&self, path: &Path) -> bool {
+        path.starts_with(&self.paths.continue_sessions_root)
+    }
+
     fn is_source_event(&self, path: &Path) -> bool {
         let is_jsonl = path.extension().and_then(|e| e.to_str()) == Some("jsonl");
         let is_ui_messages = path.file_name().and_then(|n| n.to_str()) == Some("ui_messages.json");
+        let is_continue = path.extension().and_then(|e| e.to_str()) == Some("json") && self.under_continue(path);
+        let is_opencode = path == self.paths.opencode_db_path
+            || path.file_name().and_then(|n| n.to_str()) == Some("opencode.db")
+            || path.file_name().and_then(|n| n.to_str()) == Some("opencode.db-wal");
         (is_jsonl
             && (self.under_projects(path)
                 || self.under_codex(path)
+                || self.under_omp(path)
                 || path == self.paths.aider_analytics_path))
             || (is_ui_messages && (self.under_cline(path) || self.under_roo(path)))
+            || is_continue
+            || is_opencode
     }
 
     fn is_projects_root(&self, path: &Path) -> bool {
@@ -1061,6 +1177,58 @@ impl<S: EventSink> DataEngine<S> {
         }
     }
 
+    fn try_watch_continue_sessions(&mut self) -> bool {
+        if self.continue_sessions_watched {
+            return true;
+        }
+        let Some(watcher) = self.watcher.as_mut() else {
+            return false;
+        };
+        match watcher.watch(&self.paths.continue_sessions_root, RecursiveMode::Recursive) {
+            Ok(()) => {
+                self.continue_sessions_watched = true;
+                eprintln!("[token-watcher] 检测到 continue/sessions 目录，已开始监听");
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn try_watch_omp_sessions(&mut self) -> bool {
+        if self.omp_sessions_watched {
+            return true;
+        }
+        let Some(watcher) = self.watcher.as_mut() else {
+            return false;
+        };
+        match watcher.watch(&self.paths.omp_sessions_root, RecursiveMode::Recursive) {
+            Ok(()) => {
+                self.omp_sessions_watched = true;
+                eprintln!("[token-watcher] 检测到 omp/agent/sessions 目录，已开始监听");
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn try_watch_opencode(&mut self) -> bool {
+        if self.opencode_watched {
+            return true;
+        }
+        let Some(watcher) = self.watcher.as_mut() else {
+            return false;
+        };
+        let target = self.paths.opencode_db_path.parent().unwrap_or(&self.paths.opencode_db_path);
+        match watcher.watch(target, RecursiveMode::NonRecursive) {
+            Ok(()) => {
+                self.opencode_watched = true;
+                eprintln!("[token-watcher] 检测到 opencode.db 目录，已开始监听");
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     fn try_watch_projects(&mut self) -> bool {
         if self.projects_watched {
             return true;
@@ -1131,6 +1299,8 @@ impl<S: EventSink> DataEngine<S> {
             &self.paths.codex_sessions_root,
             &self.paths.cline_tasks_root,
             &self.paths.roo_tasks_root,
+            &self.paths.continue_sessions_root,
+            &self.paths.omp_sessions_root,
         ]
         .into_iter()
         .filter(|p| p.exists())
@@ -1167,6 +1337,22 @@ impl<S: EventSink> DataEngine<S> {
                 }
                 Err(CoreError::Db(e)) => {
                     eprintln!("[token-watcher] 补扫 aider 数据库错误: {e}");
+                    self.store = Some(store);
+                    self.enter_readonly();
+                    return false;
+                }
+                Err(_) => {}
+            }
+        }
+        if self.paths.opencode_db_path.is_file() {
+            match ingest::ingest_file(&mut store, &self.paths.opencode_db_path) {
+                Ok(stats) => {
+                    if stats.records > 0 || stats.truncated {
+                        changed = true;
+                    }
+                }
+                Err(CoreError::Db(e)) => {
+                    eprintln!("[token-watcher] 补扫 opencode 数据库错误: {e}");
                     self.store = Some(store);
                     self.enter_readonly();
                     return false;
@@ -1224,13 +1410,34 @@ impl<S: EventSink> DataEngine<S> {
         {
             self.needs_catchup = true;
         }
+        if !self.continue_sessions_watched
+            && self.paths.continue_sessions_root.exists()
+            && self.try_watch_continue_sessions()
+        {
+            self.needs_catchup = true;
+        }
+        if !self.omp_sessions_watched
+            && self.paths.omp_sessions_root.exists()
+            && self.try_watch_omp_sessions()
+        {
+            self.needs_catchup = true;
+        }
+        if !self.opencode_watched
+            && self.paths.opencode_db_path.exists()
+            && self.try_watch_opencode()
+        {
+            self.needs_catchup = true;
+        }
 
         // 根目录之前不可读或有待补扫 → 趁机重试一次（不引入轮询）
         let root_exists = self.paths.projects_root.exists()
             || self.paths.codex_sessions_root.exists()
             || self.paths.cline_tasks_root.exists()
             || self.paths.roo_tasks_root.exists()
-            || self.paths.aider_analytics_path.exists();
+            || self.paths.continue_sessions_root.exists()
+            || self.paths.omp_sessions_root.exists()
+            || self.paths.aider_analytics_path.exists()
+            || self.paths.opencode_db_path.exists();
         if (self.health.root_unreadable || self.needs_catchup) && root_exists && self.quiet_scan() {
             self.needs_catchup = false;
             self.emit_dirty();

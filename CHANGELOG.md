@@ -7,6 +7,16 @@
 
 ---
 
+## [0.5.0-dev] - 2026-10-21
+
+### Added
+- **多数据源生态 2.0（OpenCode / Continue.dev / omp 原生接入）**：
+  - **OpenCode 原生直读**：以纯只读模式（`PRAGMA query_only = ON;`）增量读取 `~/.local/share/opencode/opencode.db` 的 `message` 表，基于 `max(time_created)` 作为时间戳游标，彻底消除与 OpenCode 运行时的 SQLite WAL 锁冲突；
+  - **Continue.dev 会话解析**：扫描 `~/.continue/sessions/*.json`，结合 `(mtime, size)` 毫秒级跳过与全量解析，提取会话历史数组与 `promptLogs` 中的 Token 消耗；
+  - **omp 项目分层日志接入**：递归扫描 `~/.omp/agent/sessions/**/*.jsonl`，按项目目录分层提取 `assistant` 角色下的 `message.usage` 四维指标；
+  - **微徽标矩阵扩充**：会话列表与会话飞行记录仪全面适配 `[OpenCode]`（翡翠绿）、`[Continue]`（青蓝）、`[omp]`（深金黄）微徽标；
+  - 新增 `t18_multi_source_v2.rs` 集成测试，全量 18 个测试套件 137 项测试全绿，Clippy 零告警。
+
 ## [0.4.1] - 2026-10-21
 
 ### Added

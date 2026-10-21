@@ -772,6 +772,233 @@ pub fn parse_aider_line(line: &[u8], tracker: &mut AiderSessionTracker) -> Parse
     })
 }
 
+/// 解析 omp 的项目 JSONL 会话单行
+pub fn parse_omp_line(line: &[u8], session_id: &str) -> ParsedLine {
+    let line = trim_bytes(line);
+    if line.is_empty() {
+        return ParsedLine::Ignored;
+    }
+    let Ok(val) = serde_json::from_slice::<Value>(line) else {
+        return ParsedLine::Bad;
+    };
+    let Some(obj) = val.as_object() else {
+        return ParsedLine::Bad;
+    };
+
+    if obj.get("type").and_then(Value::as_str) != Some("message") {
+        return ParsedLine::Ignored;
+    }
+    let Some(msg) = obj.get("message").and_then(Value::as_object) else {
+        return ParsedLine::Ignored;
+    };
+    if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+        return ParsedLine::Ignored;
+    }
+    let Some(usage) = msg.get("usage").and_then(Value::as_object) else {
+        return ParsedLine::Ignored;
+    };
+
+    let input = token_value(usage.get("input")).unwrap_or(0);
+    let output = token_value(usage.get("output")).unwrap_or(0);
+    let cache_read = token_value(usage.get("cacheRead")).unwrap_or(0);
+    let cache_write = token_value(usage.get("cacheWrite")).unwrap_or(0);
+
+    if input < 0 || output < 0 || cache_read < 0 || cache_write < 0 {
+        return ParsedLine::Bad;
+    }
+    if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 {
+        return ParsedLine::Ignored;
+    }
+
+    let timestamp_ms = parse_ts_value(obj.get("timestamp")).unwrap_or(0);
+
+    let msg_id = obj
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let id_part = if msg_id.is_empty() {
+        hash_prefix_8(line)
+    } else {
+        msg_id.to_string()
+    };
+
+    let model = msg
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+
+    let record_id = format!("omp:{}:{}", session_id, id_part);
+
+    ParsedLine::Record(UsageRecord {
+        record_id,
+        session_id: session_id.to_string(),
+        timestamp_ms,
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_write,
+        model,
+        entrypoint: "omp".to_string(),
+        is_sidechain: false,
+        cwd: None,
+        cc_version: None,
+    })
+}
+
+/// 解析 OpenCode 消息表的一行记录
+pub fn parse_opencode_message(
+    msg_id: &str,
+    session_id: &str,
+    time_created: i64,
+    data_json: &str,
+) -> Option<UsageRecord> {
+    let Ok(data) = serde_json::from_str::<Value>(data_json) else {
+        return None;
+    };
+    let obj = data.as_object()?;
+    if obj.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let tokens = obj.get("tokens")?.as_object()?;
+
+    let input = token_value(tokens.get("input")).unwrap_or(0);
+    let output = token_value(tokens.get("output")).unwrap_or(0);
+    let cache_obj = tokens.get("cache").and_then(Value::as_object);
+    let cache_read = cache_obj
+        .and_then(|c| token_value(c.get("read")))
+        .unwrap_or(0);
+    let cache_write = cache_obj
+        .and_then(|c| token_value(c.get("write")))
+        .unwrap_or(0);
+
+    if input < 0 || output < 0 || cache_read < 0 || cache_write < 0 {
+        return None;
+    }
+    if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 {
+        return None;
+    }
+
+    let model = obj
+        .get("modelID")
+        .and_then(Value::as_str)
+        .unwrap_or("opencode-model")
+        .to_string();
+
+    let cwd = obj
+        .get("path")
+        .and_then(Value::as_object)
+        .and_then(|p| p.get("cwd"))
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+
+    let record_id = format!("opencode:{}:{}", session_id, msg_id);
+
+    Some(UsageRecord {
+        record_id,
+        session_id: session_id.to_string(),
+        timestamp_ms: time_created,
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_write,
+        model,
+        entrypoint: "opencode".to_string(),
+        is_sidechain: false,
+        cwd,
+        cc_version: None,
+    })
+}
+
+/// 解析 Continue.dev 会话 JSON 记录
+pub fn parse_continue_session(
+    file_session_id: &str,
+    bytes: &[u8],
+) -> Result<Vec<UsageRecord>, CoreError> {
+    let root: Value = serde_json::from_slice(bytes)
+        .map_err(|e| CoreError::Other(format!("Continue JSON 解析失败: {e}")))?;
+    let session_id = root
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .unwrap_or(file_session_id);
+    let history = match root.get("history").and_then(Value::as_array) {
+        Some(h) => h,
+        None => return Ok(Vec::new()),
+    };
+
+    let mut records = Vec::new();
+    for (idx, item) in history.iter().enumerate() {
+        let msg = item.get("message").and_then(Value::as_object);
+        let role = msg
+            .and_then(|m| m.get("role"))
+            .or_else(|| item.get("role"))
+            .and_then(Value::as_str);
+        if role != Some("assistant") {
+            continue;
+        }
+
+        let mut input_tokens = 0i64;
+        let mut output_tokens = 0i64;
+        let mut model_name = "continue-model".to_string();
+        let mut found = false;
+
+        if let Some(prompt_logs) = item.get("promptLogs").and_then(Value::as_array) {
+            for log in prompt_logs {
+                let p = token_value(log.get("promptTokens")).unwrap_or(0);
+                let c = token_value(log.get("completionTokens")).unwrap_or(0);
+                if p > 0 || c > 0 {
+                    input_tokens += p;
+                    output_tokens += c;
+                    if let Some(m) = log.get("modelTitle").and_then(Value::as_str) {
+                        model_name = m.to_string();
+                    }
+                    found = true;
+                }
+            }
+        }
+
+        if !found {
+            let usage = item.get("usage").or_else(|| msg.and_then(|m| m.get("usage")));
+            if let Some(u) = usage.and_then(Value::as_object) {
+                let p = token_value(u.get("prompt_tokens").or_else(|| u.get("input"))).unwrap_or(0);
+                let c = token_value(u.get("completion_tokens").or_else(|| u.get("output"))).unwrap_or(0);
+                if p > 0 || c > 0 {
+                    input_tokens = p;
+                    output_tokens = c;
+                    found = true;
+                }
+            }
+        }
+
+        if !found || (input_tokens == 0 && output_tokens == 0) {
+            continue;
+        }
+
+        let timestamp_ms = parse_ts_value(item.get("timestamp"))
+            .or_else(|| msg.and_then(|m| parse_ts_value(m.get("timestamp"))))
+            .unwrap_or(0);
+
+        let record_id = format!("continue:{}:{}:{}", session_id, idx, timestamp_ms);
+
+        records.push(UsageRecord {
+            record_id,
+            session_id: session_id.to_string(),
+            timestamp_ms,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            model: model_name,
+            entrypoint: "continue".to_string(),
+            is_sidechain: false,
+            cwd: None,
+            cc_version: None,
+        });
+    }
+
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

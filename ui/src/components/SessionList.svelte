@@ -19,6 +19,9 @@
       case "roo": return "Roo";
       case "aider": return "Aider";
       case "cursor": return "Cursor";
+      case "opencode": return "OpenCode";
+      case "continue": return "Continue";
+      case "omp": return "omp";
       default: return "Claude";
     }
   }
@@ -138,6 +141,18 @@
   .engine-badge.cursor {
     color: color-mix(in srgb, #94a3b8 70%, var(--text-2));
     border-color: color-mix(in srgb, #94a3b8 30%, var(--line));
+  }
+  .engine-badge.opencode {
+    color: color-mix(in srgb, #10b981 70%, var(--text-2));
+    border-color: color-mix(in srgb, #10b981 30%, var(--line));
+  }
+  .engine-badge.continue {
+    color: color-mix(in srgb, #06b6d4 70%, var(--text-2));
+    border-color: color-mix(in srgb, #06b6d4 30%, var(--line));
+  }
+  .engine-badge.omp {
+    color: color-mix(in srgb, #eab308 70%, var(--text-2));
+    border-color: color-mix(in srgb, #eab308 30%, var(--line));
   }
   .session-btn:hover .engine-badge {
     border-color: var(--line-strong);
