@@ -13,6 +13,8 @@
 //! - 未知字段一律忽略，schema 漂移不得 panic。
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use super::CoreError;
 
 /// 一条 assistant 用量记录（已做字段映射与校验）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -509,6 +511,267 @@ pub fn parse_codex_line(line: &[u8], state: &mut CodexFileState) -> ParsedLine {
     }
 }
 
+/// 计算输入字节流的 SHA-256 哈希前 8 位十六进制字符串
+pub fn hash_prefix_8(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    let mut s = String::with_capacity(8);
+    for byte in &result[0..4] {
+        use std::fmt::Write;
+        let _ = write!(&mut s, "{:02x}", byte);
+    }
+    s
+}
+
+/// 解析多样化时间戳值（毫秒数字、秒级数字、ISO 8601 字符串）
+pub fn parse_ts_value(value: Option<&Value>) -> Option<i64> {
+    let value = value?;
+    if let Some(i) = value.as_i64() {
+        if i > 1_000_000_000_000 {
+            Some(i)
+        } else {
+            Some(i * 1000)
+        }
+    } else if let Some(u) = value.as_u64() {
+        let i = u.min(i64::MAX as u64) as i64;
+        if i > 1_000_000_000_000 {
+            Some(i)
+        } else {
+            Some(i * 1000)
+        }
+    } else if let Some(s) = value.as_str() {
+        if let Ok(num) = s.parse::<i64>() {
+            if num > 1_000_000_000_000 {
+                Some(num)
+            } else {
+                Some(num * 1000)
+            }
+        } else {
+            parse_timestamp_ms(s)
+        }
+    } else {
+        None
+    }
+}
+
+/// 从 Cline / Roo Code 的 `api_conversation_history.json` 内容中提取模型名称
+pub fn extract_cline_model(history_content: &str) -> String {
+    const ENV_START: &str = "<environment_details>";
+    const ENV_END: &str = "</environment_details>";
+    let mut last_model = None;
+    let mut search_from = 0;
+    while let Some(start_rel) = history_content[search_from..].find(ENV_START) {
+        let start = search_from + start_rel + ENV_START.len();
+        let end = match history_content[start..].find(ENV_END) {
+            Some(end_rel) => start + end_rel,
+            None => history_content.len(),
+        };
+        let block = &history_content[start..end];
+        if let Some(model) = extract_tag_content(block, "model") {
+            last_model = Some(model);
+        }
+        search_from = end + if end < history_content.len() { ENV_END.len() } else { 0 };
+    }
+    last_model
+        .or_else(|| extract_tag_content(history_content, "model"))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn extract_tag_content(text: &str, tag: &str) -> Option<String> {
+    let open_tag = format!("<{}>", tag);
+    let close_tag = format!("</{}>", tag);
+    let start = text.find(&open_tag)? + open_tag.len();
+    let end = start + text[start..].find(&close_tag)?;
+    let val = text[start..end].trim();
+    if val.is_empty() {
+        None
+    } else {
+        Some(val.to_string())
+    }
+}
+
+/// 解析 Cline 或 Roo Code 的 `ui_messages.json`，提取全部 `api_req_started` 用量记录
+pub fn parse_cline_roo_entries(
+    engine: &str,
+    task_id: &str,
+    ui_messages_json: &[u8],
+    model: &str,
+) -> Result<Vec<UsageRecord>, CoreError> {
+    let value: Value = serde_json::from_slice(ui_messages_json)
+        .map_err(|e| CoreError::Other(format!("JSON parse error: {e}")))?;
+    let Some(entries) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+
+    let mut records = Vec::new();
+    for entry in entries {
+        let Some(entry_obj) = entry.as_object() else {
+            continue;
+        };
+        if entry_obj.get("type").and_then(Value::as_str) != Some("say")
+            || entry_obj.get("say").and_then(Value::as_str) != Some("api_req_started")
+        {
+            continue;
+        }
+
+        let Some(text_str) = entry_obj.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(timestamp_ms) = parse_ts_value(entry_obj.get("ts")) else {
+            continue;
+        };
+
+        let Ok(text_val) = serde_json::from_str::<Value>(text_str) else {
+            continue;
+        };
+        let Some(text_obj) = text_val.as_object() else {
+            continue;
+        };
+
+        let tokens_in = token_value(text_obj.get("tokensIn")).unwrap_or(0);
+        let tokens_out = token_value(text_obj.get("tokensOut")).unwrap_or(0);
+        let cache_reads = token_value(text_obj.get("cacheReads")).unwrap_or(0);
+        let cache_writes = token_value(text_obj.get("cacheWrites")).unwrap_or(0);
+        let api_protocol = text_obj
+            .get("apiProtocol")
+            .and_then(Value::as_str)
+            .unwrap_or("anthropic");
+
+        if tokens_in < 0 || tokens_out < 0 || cache_reads < 0 || cache_writes < 0 {
+            continue;
+        }
+
+        // D24: 四维 Token 互斥归一化
+        let net_input = if api_protocol.eq_ignore_ascii_case("openai") {
+            if tokens_in < cache_reads + cache_writes {
+                continue;
+            }
+            tokens_in - cache_reads - cache_writes
+        } else {
+            // Anthropic 协议下 tokensIn 已是净输入，不能扣减
+            tokens_in
+        };
+
+        // D26: 稳定内容键，杜绝 Rewind 覆写/双计
+        let hash_part = hash_prefix_8(text_str.as_bytes());
+        let record_id = format!("{}:{}:{}:{}", engine, task_id, timestamp_ms, hash_part);
+
+        records.push(UsageRecord {
+            record_id,
+            session_id: task_id.to_string(),
+            timestamp_ms,
+            input_tokens: net_input,
+            output_tokens: tokens_out,
+            cache_read_tokens: cache_reads,
+            cache_creation_tokens: cache_writes,
+            model: model.to_string(),
+            entrypoint: engine.to_string(),
+            is_sidechain: false,
+            cwd: None,
+            cc_version: None,
+        });
+    }
+
+    Ok(records)
+}
+
+/// Aider 会话切片追踪器（D29：相邻消息 > 30min 切分新会话）
+#[derive(Debug, Default, Clone)]
+pub struct AiderSessionTracker {
+    pub last_timestamp_ms: i64,
+    pub current_session_id: Option<String>,
+}
+
+impl AiderSessionTracker {
+    pub fn get_or_create_session(&mut self, user_id: &str, timestamp_ms: i64) -> String {
+        let gap = (timestamp_ms - self.last_timestamp_ms).abs();
+        let should_new = self.current_session_id.is_none() || gap > 1_800_000;
+        if should_new {
+            let user_short = if user_id.len() >= 8 {
+                &user_id[..8]
+            } else {
+                user_id
+            };
+            let session_id = format!("aider:{}:{}", user_short, timestamp_ms);
+            self.current_session_id = Some(session_id.clone());
+            self.last_timestamp_ms = timestamp_ms;
+            session_id
+        } else {
+            self.last_timestamp_ms = timestamp_ms;
+            self.current_session_id.clone().unwrap()
+        }
+    }
+}
+
+/// 解析 Aider 的 `analytics.jsonl` 单行
+pub fn parse_aider_line(line: &[u8], tracker: &mut AiderSessionTracker) -> ParsedLine {
+    let line = trim_bytes(line);
+    if line.is_empty() {
+        return ParsedLine::Ignored;
+    }
+    let Ok(val) = serde_json::from_slice::<Value>(line) else {
+        return ParsedLine::Bad;
+    };
+    let Some(obj) = val.as_object() else {
+        return ParsedLine::Bad;
+    };
+    if obj.get("event").and_then(Value::as_str) != Some("message_send") {
+        return ParsedLine::Ignored;
+    }
+
+    let user_id = obj
+        .get("user_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown_user");
+    let timestamp_ms = match obj.get("time") {
+        Some(Value::Number(n)) => {
+            if let Some(secs) = n.as_i64() {
+                secs * 1000
+            } else if let Some(secs_f) = n.as_f64() {
+                (secs_f * 1000.0) as i64
+            } else {
+                return ParsedLine::Bad;
+            }
+        }
+        _ => return ParsedLine::Bad,
+    };
+
+    let Some(props) = obj.get("properties").and_then(Value::as_object) else {
+        return ParsedLine::Bad;
+    };
+
+    let model = props
+        .get("main_model")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let prompt_tokens = token_value(props.get("prompt_tokens")).unwrap_or(0);
+    let completion_tokens = token_value(props.get("completion_tokens")).unwrap_or(0);
+
+    if prompt_tokens < 0 || completion_tokens < 0 {
+        return ParsedLine::Bad;
+    }
+
+    let session_id = tracker.get_or_create_session(user_id, timestamp_ms);
+    let line_hash = hash_prefix_8(line);
+    let record_id = format!("aider:{}:{}:{}", user_id, timestamp_ms, line_hash);
+
+    ParsedLine::Record(UsageRecord {
+        record_id,
+        session_id,
+        timestamp_ms,
+        input_tokens: prompt_tokens,
+        output_tokens: completion_tokens,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        model: model.to_string(),
+        entrypoint: "aider".to_string(),
+        is_sidechain: false,
+        cwd: None,
+        cc_version: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,5 +1194,139 @@ mod tests {
             }).to_string();
             assert_eq!(parse_codex_line(line.as_bytes(), &mut state), ParsedLine::Ignored);
         }
+    }
+
+    #[test]
+    fn test_parse_cline_roo_anthropic_and_openai_normalization() {
+        let ui_json = json!([
+            {
+                "type": "say",
+                "say": "api_req_started",
+                "ts": 1761516645000i64,
+                "text": json!({
+                    "tokensIn": 5000,
+                    "tokensOut": 200,
+                    "cacheReads": 2000,
+                    "cacheWrites": 500,
+                    "cost": 0.05,
+                    "apiProtocol": "anthropic"
+                }).to_string()
+            },
+            {
+                "type": "say",
+                "say": "api_req_started",
+                "ts": 1761516650000i64,
+                "text": json!({
+                    "tokensIn": 6000,
+                    "tokensOut": 300,
+                    "cacheReads": 2000,
+                    "cacheWrites": 1000,
+                    "cost": 0.08,
+                    "apiProtocol": "openai"
+                }).to_string()
+            },
+            {
+                // OpenAI 破损行：cacheReads + cacheWrites > tokensIn
+                "type": "say",
+                "say": "api_req_started",
+                "ts": 1761516655000i64,
+                "text": json!({
+                    "tokensIn": 1000,
+                    "tokensOut": 50,
+                    "cacheReads": 2000,
+                    "cacheWrites": 500,
+                    "apiProtocol": "openai"
+                }).to_string()
+            }
+        ]).to_string();
+
+        let history = r#"
+        <environment_details>
+        <model>claude-3-7-sonnet-20250219</model>
+        <name>ClineTask</name>
+        </environment_details>
+        "#;
+        let model = extract_cline_model(history);
+        assert_eq!(model, "claude-3-7-sonnet-20250219");
+
+        let records = parse_cline_roo_entries("cline", "task-abc", ui_json.as_bytes(), &model).unwrap();
+        assert_eq!(records.len(), 2, "第3条破损行应被自动跳过");
+
+        // 第 1 条 (Anthropic)：tokensIn 已是净输入，不能减
+        assert_eq!(records[0].input_tokens, 5000);
+        assert_eq!(records[0].output_tokens, 200);
+        assert_eq!(records[0].cache_read_tokens, 2000);
+        assert_eq!(records[0].cache_creation_tokens, 500);
+        assert_eq!(records[0].entrypoint, "cline");
+        assert!(records[0].record_id.starts_with("cline:task-abc:1761516645000:"));
+
+        // 第 2 条 (OpenAI)：6000 - 2000 - 1000 = 3000
+        assert_eq!(records[1].input_tokens, 3000);
+        assert_eq!(records[1].output_tokens, 300);
+        assert_eq!(records[1].cache_read_tokens, 2000);
+        assert_eq!(records[1].cache_creation_tokens, 1000);
+    }
+
+    #[test]
+    fn test_parse_aider_sessionization_30min() {
+        let mut tracker = AiderSessionTracker::default();
+        let line1 = json!({
+            "event": "message_send",
+            "user_id": "u1234567890",
+            "time": 1755100000,
+            "properties": {
+                "main_model": "gpt-5.2",
+                "prompt_tokens": 1200,
+                "completion_tokens": 150,
+                "cost": 0.02
+            }
+        }).to_string();
+
+        // 10 分钟后（同会话）
+        let line2 = json!({
+            "event": "message_send",
+            "user_id": "u1234567890",
+            "time": 1755100600,
+            "properties": {
+                "main_model": "gpt-5.2",
+                "prompt_tokens": 1500,
+                "completion_tokens": 200,
+                "cost": 0.03
+            }
+        }).to_string();
+
+        // 40 分钟后（> 30 分钟，触发新会话切片）
+        let line3 = json!({
+            "event": "message_send",
+            "user_id": "u1234567890",
+            "time": 1755103100,
+            "properties": {
+                "main_model": "gemini-3-flash",
+                "prompt_tokens": 800,
+                "completion_tokens": 80,
+                "cost": 0.01
+            }
+        }).to_string();
+
+        let r1 = match parse_aider_line(line1.as_bytes(), &mut tracker) {
+            ParsedLine::Record(r) => r,
+            other => panic!("预期 Record，实际: {:?}", other),
+        };
+        let r2 = match parse_aider_line(line2.as_bytes(), &mut tracker) {
+            ParsedLine::Record(r) => r,
+            other => panic!("预期 Record，实际: {:?}", other),
+        };
+        let r3 = match parse_aider_line(line3.as_bytes(), &mut tracker) {
+            ParsedLine::Record(r) => r,
+            other => panic!("预期 Record，实际: {:?}", other),
+        };
+
+        assert_eq!(r1.session_id, r2.session_id, "10分钟内的消息应属于同一会话");
+        assert_ne!(r1.session_id, r3.session_id, "超过30分钟的消息应切分新会话");
+        assert_eq!(r1.input_tokens, 1200);
+        assert_eq!(r1.output_tokens, 150);
+        assert_eq!(r1.model, "gpt-5.2");
+        assert_eq!(r1.entrypoint, "aider");
+        assert_eq!(r3.model, "gemini-3-flash");
     }
 }

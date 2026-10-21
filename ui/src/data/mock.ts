@@ -291,7 +291,7 @@ function buildDashboard(range: Range): Dashboard {
       Math.round(baseSessions[index] * SESSION_SCALE[range]) +
       (index === 0 ? delta : 0),
     active: index === 0,
-    engine: index === 1 ? "codex" : "claude",
+    engine: index === 1 ? "codex" : index === 2 ? "cline" : index === 3 ? "aider" : "claude",
   }));
   const now = Date.now();
   const windowPulses = pulses

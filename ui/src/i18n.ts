@@ -82,7 +82,7 @@ const zh = {
   "scan.title": "首次扫描",
   "scan.detail": "{done} / {total} 文件 · {pct}%",
   "scan.emptyTitle": "未找到本地会话数据",
-  "scan.emptyHint": "使用 Claude Code 或 Codex CLI 后，用量会出现在这里。",
+  "scan.emptyHint": "使用 Claude Code、Codex CLI、Cline 或 Aider 后，用量会出现在这里。",
 
   "health.root": "无法读取数据目录 · 数据可能不完整",
   "health.skipped": "跳过 {n} 文件",
@@ -198,7 +198,7 @@ const en: Record<MessageKey, string> = {
   "scan.title": "First scan",
   "scan.detail": "{done} / {total} files · {pct}%",
   "scan.emptyTitle": "No local session data found",
-  "scan.emptyHint": "Usage appears here after using Claude Code or Codex CLI.",
+  "scan.emptyHint": "Usage appears here after using Claude Code, Codex CLI, Cline, or Aider.",
 
   "health.root": "Cannot read data directory · data may be incomplete",
   "health.skipped": "{n} files skipped",

@@ -456,10 +456,15 @@ impl Store {
                         .query_row(params![&r.record_id], |row| row.get(0))
                         .ok();
                     let is_codex = r.record_id.starts_with("codex:");
+                    let is_isolated_engine = r.record_id.starts_with("cline:")
+                        || r.record_id.starts_with("roo:")
+                        || r.record_id.starts_with("aider:");
                     let (profile_id, attr_source) = if let Some(pid) = proxy_id {
                         (Some(pid), "proxy")
                     } else if is_codex {
                         (codex_profile_id, "config")
+                    } else if is_isolated_engine {
+                        (None, "unknown")
                     } else {
                         (attr::attribute_at(&timeline, r.timestamp_ms), "timeline")
                     };

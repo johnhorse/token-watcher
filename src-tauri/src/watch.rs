@@ -49,6 +49,9 @@ pub struct DataPaths {
     pub codex_sessions_root: PathBuf,
     pub codex_config_path: PathBuf,
     pub codex_dir: PathBuf,
+    pub cline_tasks_root: PathBuf,
+    pub roo_tasks_root: PathBuf,
+    pub aider_analytics_path: PathBuf,
     pub db_path: PathBuf,
 }
 
@@ -58,6 +61,26 @@ impl DataPaths {
             home::home_dir().ok_or_else(|| CoreError::Other("无法定位用户 home 目录".into()))?;
         let claude_dir = home.join(".claude");
         let codex_dir = home.join(".codex");
+
+        #[cfg(target_os = "macos")]
+        let global_storage = home.join("Library/Application Support/Code/User/globalStorage");
+        #[cfg(target_os = "windows")]
+        let global_storage = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Roaming"))
+            .join("Code/User/globalStorage");
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let global_storage = home.join(".config/Code/User/globalStorage");
+
+        let cline_tasks_root = global_storage.join("saoudrizwan.claude-dev").join("tasks");
+        let roo_tasks_root = global_storage.join("rooveterinaryinc.roo-cline").join("tasks");
+
+        let aider_analytics_path = if home.join(".aider/analytics.jsonl").exists() {
+            home.join(".aider/analytics.jsonl")
+        } else {
+            home.join(".aider.analytics.jsonl")
+        };
+
         Ok(Self {
             projects_root: claude_dir.join("projects"),
             settings_path: claude_dir.join("settings.json"),
@@ -65,8 +88,28 @@ impl DataPaths {
             codex_sessions_root: codex_dir.join("sessions"),
             codex_config_path: codex_dir.join("config.toml"),
             codex_dir,
+            cline_tasks_root,
+            roo_tasks_root,
+            aider_analytics_path,
             db_path: home.join(".token-watcher").join("db.sqlite3"),
         })
+    }
+
+    pub fn for_test(temp: &Path) -> Self {
+        let claude_dir = temp.join("claude");
+        let codex_dir = temp.join("codex");
+        Self {
+            projects_root: claude_dir.join("projects"),
+            settings_path: claude_dir.join("settings.json"),
+            claude_dir,
+            codex_sessions_root: codex_dir.join("sessions"),
+            codex_config_path: codex_dir.join("config.toml"),
+            codex_dir,
+            cline_tasks_root: temp.join("cline_tasks"),
+            roo_tasks_root: temp.join("roo_tasks"),
+            aider_analytics_path: temp.join("aider.jsonl"),
+            db_path: temp.join("db.sqlite3"),
+        }
     }
 }
 
@@ -233,11 +276,16 @@ pub struct DataEngine<S: EventSink> {
     claude_dir_canonical: Option<PathBuf>,
     codex_sessions_root_canonical: Option<PathBuf>,
     codex_dir_canonical: Option<PathBuf>,
+    cline_tasks_root_canonical: Option<PathBuf>,
+    roo_tasks_root_canonical: Option<PathBuf>,
     sink: S,
     /// 由 notify 回调持有；Drop 即停止监听
     watcher: Option<RecommendedWatcher>,
     projects_watched: bool,
     codex_sessions_watched: bool,
+    cline_tasks_watched: bool,
+    roo_tasks_watched: bool,
+    aider_watched: bool,
     store: Option<Store>,
     /// 去抖批次中待 ingest 的 JSONL 文件
     pending_files: HashSet<PathBuf>,
@@ -264,6 +312,8 @@ impl<S: EventSink> DataEngine<S> {
         let claude_dir_canonical = fs::canonicalize(&paths.claude_dir).ok();
         let codex_sessions_root_canonical = fs::canonicalize(&paths.codex_sessions_root).ok();
         let codex_dir_canonical = fs::canonicalize(&paths.codex_dir).ok();
+        let cline_tasks_root_canonical = fs::canonicalize(&paths.cline_tasks_root).ok();
+        let roo_tasks_root_canonical = fs::canonicalize(&paths.roo_tasks_root).ok();
 
         let mut watcher =
             match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
@@ -282,6 +332,9 @@ impl<S: EventSink> DataEngine<S> {
 
         let mut projects_watched = false;
         let mut codex_sessions_watched = false;
+        let mut cline_tasks_watched = false;
+        let mut roo_tasks_watched = false;
+        let mut aider_watched = false;
         if let Some(w) = watcher.as_mut() {
             if paths.projects_root.exists() {
                 match w.watch(&paths.projects_root, RecursiveMode::Recursive) {
@@ -314,6 +367,34 @@ impl<S: EventSink> DataEngine<S> {
             if paths.codex_config_path.exists() {
                 let _ = w.watch(&paths.codex_config_path, RecursiveMode::NonRecursive);
             }
+
+            if paths.cline_tasks_root.exists() {
+                match w.watch(&paths.cline_tasks_root, RecursiveMode::Recursive) {
+                    Ok(()) => cline_tasks_watched = true,
+                    Err(e) => eprintln!(
+                        "[token-watcher] 监听 {} 失败: {e}",
+                        paths.cline_tasks_root.display()
+                    ),
+                }
+            }
+            if paths.roo_tasks_root.exists() {
+                match w.watch(&paths.roo_tasks_root, RecursiveMode::Recursive) {
+                    Ok(()) => roo_tasks_watched = true,
+                    Err(e) => eprintln!(
+                        "[token-watcher] 监听 {} 失败: {e}",
+                        paths.roo_tasks_root.display()
+                    ),
+                }
+            }
+            if paths.aider_analytics_path.exists() {
+                match w.watch(&paths.aider_analytics_path, RecursiveMode::NonRecursive) {
+                    Ok(()) => aider_watched = true,
+                    Err(e) => eprintln!(
+                        "[token-watcher] 监听 {} 失败: {e}",
+                        paths.aider_analytics_path.display()
+                    ),
+                }
+            }
         }
 
         let (store, health) = match Store::open(&paths.db_path) {
@@ -341,10 +422,15 @@ impl<S: EventSink> DataEngine<S> {
             claude_dir_canonical,
             codex_sessions_root_canonical,
             codex_dir_canonical,
+            cline_tasks_root_canonical,
+            roo_tasks_root_canonical,
             sink,
             watcher,
             projects_watched,
             codex_sessions_watched,
+            cline_tasks_watched,
+            roo_tasks_watched,
+            aider_watched,
             store,
             pending_files: HashSet::new(),
             settings_dirty: false,
@@ -412,20 +498,27 @@ impl<S: EventSink> DataEngine<S> {
         let roots: Vec<PathBuf> = [
             &self.paths.projects_root,
             &self.paths.codex_sessions_root,
+            &self.paths.cline_tasks_root,
+            &self.paths.roo_tasks_root,
         ]
         .into_iter()
         .filter(|p| p.exists())
         .cloned()
         .collect();
 
-        if roots.is_empty() {
+        let aider_file = if self.paths.aider_analytics_path.is_file() {
+            Some(self.paths.aider_analytics_path.clone())
+        } else {
+            None
+        };
+
+        if roots.is_empty() && aider_file.is_none() {
             self.health.root_unreadable = false;
             self.push_event("scan-progress", progress_json("empty", 0, 0));
             self.emit_dirty();
             self.publish_health_if_changed();
             return;
         }
-
         let Some(mut store) = self.store.take() else {
             return;
         };
@@ -443,7 +536,10 @@ impl<S: EventSink> DataEngine<S> {
                 any_root_unreadable = true;
                 continue;
             }
-            ingest::collect_jsonl(root, &mut all_files, &mut dirs_failed);
+            ingest::collect_source_files(root, &mut all_files, &mut dirs_failed);
+        }
+        if let Some(f) = aider_file {
+            all_files.push(f);
         }
         self.health.root_unreadable = any_root_unreadable;
         all_files.sort();
@@ -685,7 +781,7 @@ impl<S: EventSink> DataEngine<S> {
         }
         let mut relevant = false;
         for path in &event.paths {
-            if self.is_jsonl_event(path) {
+            if self.is_source_event(path) {
                 self.pending_files.insert(path.clone());
                 relevant = true;
             }
@@ -700,6 +796,27 @@ impl<S: EventSink> DataEngine<S> {
             if !self.codex_sessions_watched
                 && self.is_codex_sessions_root(path)
                 && self.try_watch_codex_sessions()
+            {
+                self.needs_catchup = true;
+                relevant = true;
+            }
+            if !self.cline_tasks_watched
+                && self.is_cline_tasks_root(path)
+                && self.try_watch_cline_tasks()
+            {
+                self.needs_catchup = true;
+                relevant = true;
+            }
+            if !self.roo_tasks_watched
+                && self.is_roo_tasks_root(path)
+                && self.try_watch_roo_tasks()
+            {
+                self.needs_catchup = true;
+                relevant = true;
+            }
+            if !self.aider_watched
+                && path == &self.paths.aider_analytics_path
+                && self.try_watch_aider()
             {
                 self.needs_catchup = true;
                 relevant = true;
@@ -730,9 +847,54 @@ impl<S: EventSink> DataEngine<S> {
         }
     }
 
-    fn is_jsonl_event(&self, path: &Path) -> bool {
-        path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-            && (self.under_projects(path) || self.under_codex(path))
+    fn under_cline(&self, path: &Path) -> bool {
+        if path.starts_with(&self.paths.cline_tasks_root) {
+            return true;
+        }
+        match (&self.cline_tasks_root_canonical, fs::canonicalize(path)) {
+            (Some(root), Ok(canonical)) => canonical.starts_with(root),
+            _ => false,
+        }
+    }
+
+    fn under_roo(&self, path: &Path) -> bool {
+        if path.starts_with(&self.paths.roo_tasks_root) {
+            return true;
+        }
+        match (&self.roo_tasks_root_canonical, fs::canonicalize(path)) {
+            (Some(root), Ok(canonical)) => canonical.starts_with(root),
+            _ => false,
+        }
+    }
+
+    fn is_cline_tasks_root(&self, path: &Path) -> bool {
+        if path == self.paths.cline_tasks_root {
+            return true;
+        }
+        match (&self.cline_tasks_root_canonical, fs::canonicalize(path)) {
+            (Some(root), Ok(canonical)) => canonical == *root,
+            _ => false,
+        }
+    }
+
+    fn is_roo_tasks_root(&self, path: &Path) -> bool {
+        if path == self.paths.roo_tasks_root {
+            return true;
+        }
+        match (&self.roo_tasks_root_canonical, fs::canonicalize(path)) {
+            (Some(root), Ok(canonical)) => canonical == *root,
+            _ => false,
+        }
+    }
+
+    fn is_source_event(&self, path: &Path) -> bool {
+        let is_jsonl = path.extension().and_then(|e| e.to_str()) == Some("jsonl");
+        let is_ui_messages = path.file_name().and_then(|n| n.to_str()) == Some("ui_messages.json");
+        (is_jsonl
+            && (self.under_projects(path)
+                || self.under_codex(path)
+                || path == self.paths.aider_analytics_path))
+            || (is_ui_messages && (self.under_cline(path) || self.under_roo(path)))
     }
 
     fn is_projects_root(&self, path: &Path) -> bool {
@@ -818,6 +980,56 @@ impl<S: EventSink> DataEngine<S> {
             }
         }
     }
+    fn try_watch_cline_tasks(&mut self) -> bool {
+        if self.cline_tasks_watched {
+            return true;
+        }
+        let Some(watcher) = self.watcher.as_mut() else {
+            return false;
+        };
+        match watcher.watch(&self.paths.cline_tasks_root, RecursiveMode::Recursive) {
+            Ok(()) => {
+                self.cline_tasks_watched = true;
+                eprintln!("[token-watcher] 检测到 cline/tasks 目录，已开始监听");
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn try_watch_roo_tasks(&mut self) -> bool {
+        if self.roo_tasks_watched {
+            return true;
+        }
+        let Some(watcher) = self.watcher.as_mut() else {
+            return false;
+        };
+        match watcher.watch(&self.paths.roo_tasks_root, RecursiveMode::Recursive) {
+            Ok(()) => {
+                self.roo_tasks_watched = true;
+                eprintln!("[token-watcher] 检测到 roo/tasks 目录，已开始监听");
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn try_watch_aider(&mut self) -> bool {
+        if self.aider_watched {
+            return true;
+        }
+        let Some(watcher) = self.watcher.as_mut() else {
+            return false;
+        };
+        match watcher.watch(&self.paths.aider_analytics_path, RecursiveMode::NonRecursive) {
+            Ok(()) => {
+                self.aider_watched = true;
+                eprintln!("[token-watcher] 检测到 aider analytics 文件，已开始监听");
+                true
+            }
+            Err(_) => false,
+        }
+    }
 
     fn try_watch_projects(&mut self) -> bool {
         if self.projects_watched {
@@ -887,12 +1099,13 @@ impl<S: EventSink> DataEngine<S> {
         let roots: Vec<PathBuf> = [
             &self.paths.projects_root,
             &self.paths.codex_sessions_root,
+            &self.paths.cline_tasks_root,
+            &self.paths.roo_tasks_root,
         ]
         .into_iter()
         .filter(|p| p.exists())
         .cloned()
         .collect();
-
         let mut changed = false;
         for root in roots {
             match ingest::scan_dir(&mut store, &root) {
@@ -913,6 +1126,22 @@ impl<S: EventSink> DataEngine<S> {
                     eprintln!("[token-watcher] 补扫根目录不可读: {e}");
                     self.health.root_unreadable = true;
                 }
+            }
+        }
+        if self.paths.aider_analytics_path.is_file() {
+            match ingest::ingest_file(&mut store, &self.paths.aider_analytics_path) {
+                Ok(stats) => {
+                    if stats.records > 0 || stats.truncated {
+                        changed = true;
+                    }
+                }
+                Err(CoreError::Db(e)) => {
+                    eprintln!("[token-watcher] 补扫 aider 数据库错误: {e}");
+                    self.store = Some(store);
+                    self.enter_readonly();
+                    return false;
+                }
+                Err(_) => {}
             }
         }
         self.store = Some(store);
@@ -946,9 +1175,31 @@ impl<S: EventSink> DataEngine<S> {
         {
             self.needs_catchup = true;
         }
+        if !self.cline_tasks_watched
+            && self.paths.cline_tasks_root.exists()
+            && self.try_watch_cline_tasks()
+        {
+            self.needs_catchup = true;
+        }
+        if !self.roo_tasks_watched
+            && self.paths.roo_tasks_root.exists()
+            && self.try_watch_roo_tasks()
+        {
+            self.needs_catchup = true;
+        }
+        if !self.aider_watched
+            && self.paths.aider_analytics_path.exists()
+            && self.try_watch_aider()
+        {
+            self.needs_catchup = true;
+        }
 
         // 根目录之前不可读或有待补扫 → 趁机重试一次（不引入轮询）
-        let root_exists = self.paths.projects_root.exists() || self.paths.codex_sessions_root.exists();
+        let root_exists = self.paths.projects_root.exists()
+            || self.paths.codex_sessions_root.exists()
+            || self.paths.cline_tasks_root.exists()
+            || self.paths.roo_tasks_root.exists()
+            || self.paths.aider_analytics_path.exists();
         if (self.health.root_unreadable || self.needs_catchup) && root_exists && self.quiet_scan() {
             self.needs_catchup = false;
             self.emit_dirty();

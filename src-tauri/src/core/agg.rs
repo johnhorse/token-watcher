@@ -713,16 +713,28 @@ fn session_title(session_id: &str, cwd: Option<&str>) -> String {
         .and_then(|c| c.rsplit(['/', '\\']).next())
         .unwrap_or("");
     if tail.is_empty() {
-        session_id.chars().take(8).collect()
+        if let Some(rest) = session_id.strip_prefix("aider:") {
+            format!("aider-{}", rest.chars().take(8).collect::<String>())
+        } else {
+            session_id.chars().take(8).collect()
+        }
     } else {
         tail.to_string()
     }
 }
 
-/// 判断记录所属数据源引擎（`"codex"` 或 `"claude"`）
+/// 判断记录所属数据源引擎（`"claude"` | `"codex"` | `"cline"` | `"roo"` | `"aider"` | `"cursor"`）
 pub fn detect_engine(record_id: &str, entrypoint: &str) -> &'static str {
     if record_id.starts_with("codex:") || entrypoint.starts_with("codex") {
         "codex"
+    } else if record_id.starts_with("cline:") || entrypoint.starts_with("cline") {
+        "cline"
+    } else if record_id.starts_with("roo:") || entrypoint.starts_with("roo") {
+        "roo"
+    } else if record_id.starts_with("aider:") || entrypoint.starts_with("aider") {
+        "aider"
+    } else if record_id.starts_with("cursor:") || entrypoint.starts_with("cursor") {
+        "cursor"
     } else {
         "claude"
     }

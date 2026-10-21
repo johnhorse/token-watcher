@@ -11,6 +11,17 @@
     sessions: SessionRow[];
     onSelect?: (sessionId: string) => void;
   } = $props();
+
+  function engineLabel(engine?: string): string {
+    switch (engine) {
+      case "codex": return "Codex";
+      case "cline": return "Cline";
+      case "roo": return "Roo";
+      case "aider": return "Aider";
+      case "cursor": return "Cursor";
+      default: return "Claude";
+    }
+  }
 </script>
 
 <section class="section">
@@ -28,7 +39,7 @@
           <span class="title">{session.title}</span>
           {#if session.engine}
             <span class="engine-badge {session.engine}">
-              {session.engine === "codex" ? "Codex" : "Claude"}
+              {engineLabel(session.engine)}
             </span>
           {/if}
           {#if session.active}
@@ -111,6 +122,22 @@
   .engine-badge.claude {
     color: color-mix(in srgb, var(--accent) 70%, var(--text-2));
     border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  }
+  .engine-badge.cline {
+    color: color-mix(in srgb, #60a5fa 70%, var(--text-2));
+    border-color: color-mix(in srgb, #60a5fa 30%, var(--line));
+  }
+  .engine-badge.roo {
+    color: color-mix(in srgb, #fb923c 70%, var(--text-2));
+    border-color: color-mix(in srgb, #fb923c 30%, var(--line));
+  }
+  .engine-badge.aider {
+    color: color-mix(in srgb, #a78bfa 70%, var(--text-2));
+    border-color: color-mix(in srgb, #a78bfa 30%, var(--line));
+  }
+  .engine-badge.cursor {
+    color: color-mix(in srgb, #94a3b8 70%, var(--text-2));
+    border-color: color-mix(in srgb, #94a3b8 30%, var(--line));
   }
   .session-btn:hover .engine-badge {
     border-color: var(--line-strong);

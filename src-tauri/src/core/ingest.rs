@@ -19,7 +19,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use super::parse::{parse_codex_line, parse_line, CodexFileState, ParsedLine, UsageRecord};
+use super::parse::{
+    extract_cline_model, parse_aider_line, parse_cline_roo_entries, parse_codex_line, parse_line,
+    AiderSessionTracker, CodexFileState, ParsedLine, UsageRecord,
+};
 use super::store::{Checkpoint, Store};
 use super::CoreError;
 
@@ -52,11 +55,30 @@ pub struct ScanStats {
 pub enum FileEngineKind {
     ClaudeCode,
     CodexCli,
+    Cline,
+    RooCode,
+    Aider,
 }
 
 /// 依据文件名及内容抽样自动判定文件所属引擎
 pub fn detect_file_kind(path: &Path, sample_bytes: &[u8]) -> FileEngineKind {
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    if filename == "ui_messages.json" {
+        let path_str = path.to_string_lossy();
+        if path_str.contains("roo-cline")
+            || path_str.contains("rooveterinaryinc")
+            || path_str.contains("roo_tasks")
+            || path_str.contains("/roo/")
+            || path_str.contains("\\roo\\")
+        {
+            return FileEngineKind::RooCode;
+        } else {
+            return FileEngineKind::Cline;
+        }
+    }
+    if filename.contains("aider") || sample_bytes.windows(14).any(|w| w == b"\"message_send\"") {
+        return FileEngineKind::Aider;
+    }
     if filename.starts_with("rollout-") && filename.ends_with(".jsonl") {
         return FileEngineKind::CodexCli;
     }
@@ -126,11 +148,63 @@ pub fn ingest_file_with_records(
         .unwrap_or(0);
 
     let key = checkpoint_key(path);
+    let engine_kind = detect_file_kind(path, &[]);
+    if engine_kind == FileEngineKind::Cline || engine_kind == FileEngineKind::RooCode {
+        let previous_count = store.get_checkpoint(&key)?.map(|c| c.byte_offset).unwrap_or(0);
+        let is_same = store
+            .get_checkpoint(&key)?
+            .map(|c| c.mtime_ms == mtime_ms && c.size == size)
+            .unwrap_or(false);
+        if is_same {
+            return Ok((FileIngestStats::default(), Vec::new()));
+        }
+        let ui_bytes = match fs::read(path) {
+            Ok(b) => b,
+            Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
+        };
+        let history_path = path.parent().unwrap_or(path).join("api_conversation_history.json");
+        let history_str = fs::read_to_string(&history_path).unwrap_or_default();
+        let model = extract_cline_model(&history_str);
+        let task_id = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown_task");
+        let engine_str = if engine_kind == FileEngineKind::RooCode {
+            "roo"
+        } else {
+            "cline"
+        };
+        let records = match parse_cline_roo_entries(engine_str, task_id, &ui_bytes, &model) {
+            Ok(r) => r,
+            Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
+        };
+        store.upsert_records(&records)?;
+        store.set_checkpoint(
+            &key,
+            Checkpoint {
+                byte_offset: records.len() as i64,
+                mtime_ms,
+                size,
+            },
+        )?;
+        let new_records = if records.len() as i64 >= previous_count {
+            records[previous_count as usize..].to_vec()
+        } else {
+            records
+        };
+        let stats = FileIngestStats {
+            records: new_records.len() as u64,
+            bad_lines: 0,
+            truncated: false,
+        };
+        return Ok((stats, new_records));
+    }
+
     let mut truncated = false;
     let mut offset = 0i64;
     if let Some(checkpoint) = store.get_checkpoint(&key)? {
         if size < checkpoint.byte_offset || mtime_ms < checkpoint.mtime_ms {
-            // 截断/轮转：从 0 重扫（UPSERT 幂等）
             truncated = true;
         } else {
             offset = checkpoint.byte_offset;
@@ -158,7 +232,7 @@ pub fn ingest_file_with_records(
     } else {
         CodexFileState::default()
     };
-
+    let mut aider_tracker = AiderSessionTracker::default();
     let mut records = Vec::new();
     let mut new_offset = offset;
     let mut line_start = 0usize;
@@ -168,6 +242,8 @@ pub fn ingest_file_with_records(
             let parsed = match engine_kind {
                 FileEngineKind::ClaudeCode => parse_line(line),
                 FileEngineKind::CodexCli => parse_codex_line(line, &mut codex_state),
+                FileEngineKind::Aider => parse_aider_line(line, &mut aider_tracker),
+                FileEngineKind::Cline | FileEngineKind::RooCode => ParsedLine::Ignored,
             };
             match parsed {
                 ParsedLine::Record(record) => records.push(record),
@@ -186,6 +262,8 @@ pub fn ingest_file_with_records(
         let parsed = match engine_kind {
             FileEngineKind::ClaudeCode => parse_line(tail),
             FileEngineKind::CodexCli => parse_codex_line(tail, &mut codex_state),
+            FileEngineKind::Aider => parse_aider_line(tail, &mut aider_tracker),
+            FileEngineKind::Cline | FileEngineKind::RooCode => ParsedLine::Ignored,
         };
         match parsed {
             ParsedLine::Record(record) => records.push(record),
@@ -266,7 +344,11 @@ where
     Ok(stats)
 }
 
-pub(crate) fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>, dirs_failed: &mut u64) {
+pub fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>, dirs_failed: &mut u64) {
+    collect_source_files(dir, out, dirs_failed);
+}
+
+pub fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>, dirs_failed: &mut u64) {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => {
@@ -280,9 +362,13 @@ pub(crate) fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>, dirs_failed: &mu
             continue;
         };
         if metadata.is_dir() {
-            collect_jsonl(&path, out, dirs_failed);
-        } else if metadata.is_file() && path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-            out.push(path);
+            collect_source_files(&path, out, dirs_failed);
+        } else if metadata.is_file() {
+            let is_jsonl = path.extension().and_then(|e| e.to_str()) == Some("jsonl");
+            let is_ui_messages = path.file_name().and_then(|n| n.to_str()) == Some("ui_messages.json");
+            if is_jsonl || is_ui_messages {
+                out.push(path);
+            }
         }
     }
 }

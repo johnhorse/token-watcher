@@ -24,6 +24,17 @@
     onBack: () => void;
   } = $props();
 
+  function engineLabel(engine?: string): string {
+    switch (engine) {
+      case "codex": return "Codex";
+      case "cline": return "Cline";
+      case "roo": return "Roo";
+      case "aider": return "Aider";
+      case "cursor": return "Cursor";
+      default: return "Claude";
+    }
+  }
+
   let recorder = $state<SessionFlightRecorder | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -118,7 +129,7 @@
         <h1 class="session-title">{recorder.title}</h1>
         {#if recorder.engine}
           <span class="engine-badge {recorder.engine}">
-            {recorder.engine === "codex" ? "Codex" : "Claude"}
+            {engineLabel(recorder.engine)}
           </span>
         {/if}
       </div>
@@ -417,6 +428,26 @@
   .engine-badge.claude {
     color: color-mix(in srgb, var(--accent) 70%, var(--text-2));
     border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  }
+
+  .engine-badge.cline {
+    color: color-mix(in srgb, #60a5fa 70%, var(--text-2));
+    border-color: color-mix(in srgb, #60a5fa 30%, var(--line));
+  }
+
+  .engine-badge.roo {
+    color: color-mix(in srgb, #fb923c 70%, var(--text-2));
+    border-color: color-mix(in srgb, #fb923c 30%, var(--line));
+  }
+
+  .engine-badge.aider {
+    color: color-mix(in srgb, #a78bfa 70%, var(--text-2));
+    border-color: color-mix(in srgb, #a78bfa 30%, var(--line));
+  }
+
+  .engine-badge.cursor {
+    color: color-mix(in srgb, #94a3b8 70%, var(--text-2));
+    border-color: color-mix(in srgb, #94a3b8 30%, var(--line));
   }
 
   .session-title {
