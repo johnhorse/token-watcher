@@ -33,27 +33,33 @@ fn parse_range(range: &str) -> Result<Range, String> {
     }
 }
 
-fn empty_dashboard(range: Range) -> Dashboard {
+fn empty_dashboard(range: Range, engine: Option<String>) -> Dashboard {
     Dashboard {
         range,
+        engine,
         totals: TokenTotals::default(),
         cost: crate::core::pricing::TokenCost::default(),
         pulses: Vec::new(),
         models: Vec::new(),
         profiles: Vec::new(),
         sessions: Vec::new(),
+        available_engines: Vec::new(),
     }
 }
 
 #[tauri::command]
-pub fn get_dashboard(state: State<'_, AppState>, range: String) -> Result<Dashboard, String> {
+pub fn get_dashboard(
+    state: State<'_, AppState>,
+    range: String,
+    engine: Option<String>,
+) -> Result<Dashboard, String> {
     let range = parse_range(&range)?;
     let snap = state.status.lock().map_err(|e| e.to_string())?.clone();
     // 首扫未完成：empty 返回空数据（UI 空态），scanning 返回空数据
     // （UI 状态机本就停在骨架，这里兜底防 fetch 失败横幅误报）
     // 仅在明确处于首扫且有剩余文件未完成时兜底返回空数据
     if snap.phase == "scanning" && snap.files_total > 0 && snap.files_done < snap.files_total {
-        return Ok(empty_dashboard(range));
+        return Ok(empty_dashboard(range, engine));
     }
     let mut guard = state.store.lock().map_err(|e| e.to_string())?;
     if guard.is_none() {
@@ -63,7 +69,8 @@ pub fn get_dashboard(state: State<'_, AppState>, range: String) -> Result<Dashbo
     let store = guard.as_ref().expect("上面刚放入");
     let price_table = state.pricing.table();
     let price_guard = price_table.read().unwrap();
-    agg::dashboard_with_prices(store, range, Some(&price_guard)).map_err(|e| e.to_string())
+    agg::dashboard_with_prices_and_engine(store, range, Some(&price_guard), engine.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -309,8 +316,12 @@ pub fn get_hud_summary(state: State<'_, AppState>) -> Result<crate::core::agg::H
         *guard = Some(store);
     }
     let store = guard.as_ref().expect("上面刚放入");
-    crate::core::agg::hud_summary(store, settings.hud_locked, &settings.effective_hud_metrics())
-        .map_err(|e| e.to_string())
+    crate::core::agg::hud_summary(
+        store,
+        settings.hud_locked,
+        &settings.effective_hud_metrics(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -367,7 +378,9 @@ pub fn move_hud_by(app: AppHandle, dx: f64, dy: f64) -> Result<(), String> {
             if let Ok(scale) = window.scale_factor() {
                 let new_x = pos.x + (dx * scale).round() as i32;
                 let new_y = pos.y + (dy * scale).round() as i32;
-                let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(new_x, new_y)));
+                let _ = window.set_position(tauri::Position::Physical(
+                    tauri::PhysicalPosition::new(new_x, new_y),
+                ));
             }
         }
     }
@@ -376,7 +389,10 @@ pub fn move_hud_by(app: AppHandle, dx: f64, dy: f64) -> Result<(), String> {
 #[tauri::command]
 pub fn resize_hud(app: AppHandle, width: f64) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(crate::hud::HUD_LABEL) {
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, crate::hud::HUD_HEIGHT)));
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+            width,
+            crate::hud::HUD_HEIGHT,
+        )));
     }
     Ok(())
 }
@@ -436,7 +452,6 @@ pub fn log_js_error(msg: String) {
     eprintln!("[WEBVIEW_JS_ERROR] {}", msg);
 }
 
-
 #[tauri::command]
 pub fn get_theme(state: State<'_, AppState>) -> Result<String, String> {
     let settings_path = crate::app_settings::path_for_db(&state.db_path);
@@ -445,11 +460,7 @@ pub fn get_theme(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn set_theme(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    theme: String,
-) -> Result<(), String> {
+pub fn set_theme(app: AppHandle, state: State<'_, AppState>, theme: String) -> Result<(), String> {
     let settings_path = crate::app_settings::path_for_db(&state.db_path);
     let mut settings = crate::app_settings::AppSettings::load(&settings_path);
     let mode = crate::app_settings::ThemeMode::from_str_loose(&theme);

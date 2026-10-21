@@ -22,6 +22,7 @@
   import ErrorBanners from "./components/ErrorBanners.svelte";
   import ProxyBar from "./components/ProxyBar.svelte";
   import FlightRecorder from "./components/FlightRecorder.svelte";
+  import EngineChips from "./components/EngineChips.svelte";
 
   const adapter: UiAdapter = createAdapter();
 
@@ -49,6 +50,7 @@
   });
   let fetchFailed = $state(false);
   let selectedSessionId = $state<string | null>(null);
+  let selectedEngine = $state<string | null>(null);
 
   let loadSeq = 0;
   let dirtyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -110,8 +112,9 @@
   async function loadNow(): Promise<void> {
     const seq = ++loadSeq;
     const requested = range;
+    const requestedEngine = selectedEngine;
     try {
-      const next = await adapter.getDashboard(requested);
+      const next = await adapter.getDashboard(requested, requestedEngine);
       if (seq !== loadSeq) return;
       fetchFailed = false;
       dashboard = next;
@@ -140,6 +143,16 @@
   function setRange(next: Range): void {
     if (next === range) return;
     range = next;
+    if (dirtyTimer) {
+      clearTimeout(dirtyTimer);
+      dirtyTimer = undefined;
+    }
+    void loadNow();
+  }
+
+  function setEngine(next: string | null): void {
+    if (next === selectedEngine) return;
+    selectedEngine = next;
     if (dirtyTimer) {
       clearTimeout(dirtyTimer);
       dirtyTimer = undefined;
@@ -381,6 +394,11 @@
       </section>
 
       <RangeChips value={range} onchange={setRange} />
+      <EngineChips
+        selectedEngine={selectedEngine}
+        availableEngines={dashboard.available_engines ?? []}
+        onselect={setEngine}
+      />
       <Chart {pulses} />
       <ModelsBar models={dashboard.models} />
       <ProxyBar {adapter} />

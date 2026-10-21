@@ -25,34 +25,67 @@
       default: return "Claude";
     }
   }
+  let searchQuery = $state("");
+  let filteredSessions = $derived.by(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return sessions;
+    return sessions.filter((s) =>
+      s.title.toLowerCase().includes(q) ||
+      s.session_id.toLowerCase().includes(q) ||
+      (s.engine && s.engine.toLowerCase().includes(q))
+    );
+  });
 </script>
 
 <section class="section">
-  <h2>{t("sessions.title")}</h2>
-  <ul>
-    {#each sessions as session (session.session_id)}
-      <li>
+  <div class="section-header">
+    <h2>{t("sessions.title")}</h2>
+    <div class="search-box">
+      <span class="search-icon" aria-hidden="true">⌕</span>
+      <input
+        type="text"
+        bind:value={searchQuery}
+        placeholder={t("sessions.search")}
+        aria-label={t("sessions.search")}
+      />
+      {#if searchQuery}
         <button
           type="button"
-          class="session-btn"
-          onclick={() => onSelect?.(session.session_id)}
-          title="{session.title} · {t('flight.title')}"
-        >
-          <span class="dot" class:on={session.active} aria-hidden="true"></span>
-          <span class="title">{session.title}</span>
-          {#if session.engine}
-            <span class="engine-badge {session.engine}">
-              {engineLabel(session.engine)}
-            </span>
-          {/if}
-          {#if session.active}
-            <span class="sr">{t("sessions.active")}</span>
-          {/if}
-          <span class="total">{formatCompact(session.total)}</span>
-          <span class="chevron" aria-hidden="true">›</span>
-        </button>
-      </li>
-    {/each}
+          class="clear-btn"
+          onclick={() => (searchQuery = "")}
+          aria-label="清除搜索"
+        >×</button>
+      {/if}
+    </div>
+  </div>
+  <ul>
+    {#if filteredSessions.length === 0}
+      <li class="no-match">{t("sessions.noMatches")}</li>
+    {:else}
+      {#each filteredSessions as session (session.session_id)}
+        <li>
+          <button
+            type="button"
+            class="session-btn"
+            onclick={() => onSelect?.(session.session_id)}
+            title="{session.title} · {t('flight.title')}"
+          >
+            <span class="dot" class:on={session.active} aria-hidden="true"></span>
+            <span class="title">{session.title}</span>
+            {#if session.engine}
+              <span class="engine-badge {session.engine}">
+                {engineLabel(session.engine)}
+              </span>
+            {/if}
+            {#if session.active}
+              <span class="sr">{t("sessions.active")}</span>
+            {/if}
+            <span class="total">{formatCompact(session.total)}</span>
+            <span class="chevron" aria-hidden="true">›</span>
+          </button>
+        </li>
+      {/each}
+    {/if}
   </ul>
 </section>
 
@@ -174,5 +207,62 @@
   .session-btn:hover .chevron {
     opacity: 1;
     color: var(--accent);
+  }
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 2px;
+  }
+  .search-box {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--bg-1);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    padding: 1px 6px;
+    transition: border-color var(--dur) var(--ease);
+  }
+  .search-box:focus-within {
+    border-color: var(--amber);
+  }
+  .search-icon {
+    font-size: 11px;
+    color: var(--text-2);
+    line-height: 1;
+  }
+  .search-box input {
+    border: none;
+    background: transparent;
+    font-family: var(--font-num);
+    font-size: 10px;
+    color: var(--text);
+    outline: none;
+    width: 80px;
+    transition: width var(--dur) var(--ease);
+  }
+  .search-box input:focus {
+    width: 105px;
+  }
+  .clear-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-2);
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 1px;
+  }
+  .clear-btn:hover {
+    color: var(--text);
+  }
+  .no-match {
+    font-size: 11px;
+    color: var(--text-2);
+    padding: 10px 0;
+    text-align: center;
+    font-style: italic;
   }
 </style>

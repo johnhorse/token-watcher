@@ -7,9 +7,9 @@
 //! 4. 聚合层 `detect_engine` 正确识别 "opencode"、"continue"、"omp"；
 //! 5. DataEngine 首扫并发接入与数据隔离。
 
+use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
-use serde_json::json;
 use token_watcher_lib::core::agg::detect_engine;
 use token_watcher_lib::core::ingest;
 use token_watcher_lib::core::store::Store;
@@ -21,7 +21,11 @@ struct TempDir {
 
 impl TempDir {
     fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("tw-test-multi-source-v2-{}-{}", name, std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "tw-test-multi-source-v2-{}-{}",
+            name,
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         Self { path }
@@ -63,8 +67,9 @@ fn test_opencode_sqlite_ingest_and_checkpoint() {
             time_created INTEGER NOT NULL,
             time_updated INTEGER NOT NULL,
             data TEXT NOT NULL
-        );"
-    ).unwrap();
+        );",
+    )
+    .unwrap();
 
     let msg1_data = json!({
         "role": "assistant",
@@ -79,7 +84,8 @@ fn test_opencode_sqlite_ingest_and_checkpoint() {
             }
         },
         "path": {"cwd": "/projects/test-opencode"}
-    }).to_string();
+    })
+    .to_string();
 
     conn.execute(
         "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -93,7 +99,8 @@ fn test_opencode_sqlite_ingest_and_checkpoint() {
     ).unwrap();
 
     // 首次 ingest
-    let (stats1, records1) = ingest::ingest_file_with_records(&mut store, &opencode_db_path).unwrap();
+    let (stats1, records1) =
+        ingest::ingest_file_with_records(&mut store, &opencode_db_path).unwrap();
     assert_eq!(stats1.records, 1);
     assert_eq!(records1.len(), 1);
     assert_eq!(records1[0].record_id, "opencode:ses_abc:msg_1");
@@ -105,7 +112,8 @@ fn test_opencode_sqlite_ingest_and_checkpoint() {
     assert_eq!(records1[0].cwd.as_deref(), Some("/projects/test-opencode"));
 
     // 第二次无新消息调用：应返回 0 增量
-    let (stats2, records2) = ingest::ingest_file_with_records(&mut store, &opencode_db_path).unwrap();
+    let (stats2, records2) =
+        ingest::ingest_file_with_records(&mut store, &opencode_db_path).unwrap();
     assert_eq!(stats2.records, 0);
     assert_eq!(records2.len(), 0);
 
@@ -122,14 +130,16 @@ fn test_opencode_sqlite_ingest_and_checkpoint() {
                 "read": 0
             }
         }
-    }).to_string();
+    })
+    .to_string();
 
     conn.execute(
         "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params!["msg_2", "ses_abc", 1777275100000i64, 1777275100000i64, msg2_data],
     ).unwrap();
 
-    let (stats3, records3) = ingest::ingest_file_with_records(&mut store, &opencode_db_path).unwrap();
+    let (stats3, records3) =
+        ingest::ingest_file_with_records(&mut store, &opencode_db_path).unwrap();
     assert_eq!(stats3.records, 1);
     assert_eq!(records3.len(), 1);
     assert_eq!(records3[0].record_id, "opencode:ses_abc:msg_2");
@@ -164,14 +174,18 @@ fn test_continue_session_ingest_and_mtime_skip() {
                 "timestamp": 1777276000000i64
             }
         ]
-    }).to_string();
+    })
+    .to_string();
 
     fs::write(&session_file, &session_content).unwrap();
 
     let (stats1, records1) = ingest::ingest_file_with_records(&mut store, &session_file).unwrap();
     assert_eq!(stats1.records, 1);
     assert_eq!(records1.len(), 1);
-    assert_eq!(records1[0].record_id, "continue:b47c093a-861f-4efc-8b83-ff621e281512:1:1777276000000");
+    assert_eq!(
+        records1[0].record_id,
+        "continue:b47c093a-861f-4efc-8b83-ff621e281512:1:1777276000000"
+    );
     assert_eq!(records1[0].input_tokens, 1000);
     assert_eq!(records1[0].output_tokens, 250);
     assert_eq!(records1[0].model, "claude-3-5-sonnet");
@@ -188,10 +202,23 @@ fn test_omp_jsonl_ingest() {
     let temp = TempDir::new("omp");
     let mut store = Store::open(&temp.path().join("db.sqlite3")).unwrap();
 
-    let omp_project_dir = temp.path().join(".omp").join("agent").join("sessions").join("my-project");
+    let omp_project_dir = temp
+        .path()
+        .join(".omp")
+        .join("agent")
+        .join("sessions")
+        .join("my-project");
     fs::create_dir_all(&omp_project_dir).unwrap();
 
     let session_file = omp_project_dir.join("2026-10-21T02-43-34-502Z_sess-omp-123.jsonl");
+
+    let line0 = json!({
+        "type": "session",
+        "id": "sess-omp-123",
+        "timestamp": "2026-10-21T02:43:34.000Z",
+        "cwd": "/Volumes/Data/projects/my-project"
+    })
+    .to_string();
 
     let line1 = json!({
         "type": "message",
@@ -207,9 +234,10 @@ fn test_omp_jsonl_ingest() {
                 "cacheWrite": 100
             }
         }
-    }).to_string();
+    })
+    .to_string();
 
-    fs::write(&session_file, format!("{}\n", line1)).unwrap();
+    fs::write(&session_file, format!("{}\n{}\n", line0, line1)).unwrap();
 
     let (stats1, records1) = ingest::ingest_file_with_records(&mut store, &session_file).unwrap();
     assert_eq!(stats1.records, 1);
@@ -222,18 +250,125 @@ fn test_omp_jsonl_ingest() {
     assert_eq!(records1[0].cache_creation_tokens, 100);
     assert_eq!(records1[0].model, "gemini-3.8-flash");
     assert_eq!(records1[0].entrypoint, "omp");
+    assert_eq!(
+        records1[0].cwd.as_deref(),
+        Some("/Volumes/Data/projects/my-project")
+    );
+}
+
+#[test]
+fn test_omp_extract_cwd_from_file_or_dir() {
+    let temp = TempDir::new("omp-cwd");
+    let proj = temp.path().join("--Volumes-Data-projects-token-watcher--");
+    fs::create_dir_all(&proj).unwrap();
+    let file = proj.join("sess.jsonl");
+    fs::write(
+        &file,
+        "{\"type\":\"session\",\"cwd\":\"/Volumes/Data/projects/token-watcher\"}\n",
+    )
+    .unwrap();
+    let cwd = ingest::extract_omp_cwd(&file);
+    assert_eq!(cwd.as_deref(), Some("/Volumes/Data/projects/token-watcher"));
+}
+
+#[test]
+fn test_omp_watcher_lock_and_dir_linkage() {
+    use notify::Event;
+    use std::sync::mpsc::channel;
+    use token_watcher_lib::watch::{DataEngine, DataPaths, EventSink};
+
+    struct DummySink;
+    impl EventSink for DummySink {
+        fn is_visible(&self) -> bool {
+            true
+        }
+        fn emit_json(&self, _event: &str, _payload: serde_json::Value) {}
+    }
+
+    let temp = TempDir::new("omp-watch");
+    let paths = DataPaths {
+        projects_root: temp.path().join("projects"),
+        claude_dir: temp.path().join("claude"),
+        settings_path: temp.path().join("settings.json"),
+        codex_sessions_root: temp.path().join("codex_sessions"),
+        codex_dir: temp.path().join("codex"),
+        codex_config_path: temp.path().join("config.toml"),
+        cline_tasks_root: temp.path().join("cline_tasks"),
+        roo_tasks_root: temp.path().join("roo_tasks"),
+        aider_analytics_path: temp.path().join("aider.jsonl"),
+        opencode_db_path: temp.path().join("opencode.db"),
+        continue_sessions_root: temp.path().join("continue_sessions"),
+        omp_sessions_root: temp.path().join("omp_sessions"),
+        db_path: temp.path().join("db.sqlite3"),
+    };
+    let (tx, _rx) = channel();
+    let mut engine = DataEngine::new(paths.clone(), DummySink, tx);
+
+    let proj_dir = paths
+        .omp_sessions_root
+        .join("--Volumes-Data-projects-token-watcher--");
+    fs::create_dir_all(&proj_dir).unwrap();
+    let jsonl_file = proj_dir.join("2026-10-21T07-27-26-821Z_sess1.jsonl");
+    fs::write(
+        &jsonl_file,
+        "{\"type\":\"session\",\"cwd\":\"/Volumes/Data/projects/token-watcher\"}\n",
+    )
+    .unwrap();
+
+    // 1. 模拟 .lock.os 事件到达
+    let lock_file = proj_dir.join(".2026-10-21T07-27-26-821Z_sess1.jsonl.lock.os");
+    fs::write(&lock_file, "").unwrap();
+    let lock_ev = Event {
+        kind: notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )),
+        paths: vec![lock_file.clone()],
+        attrs: Default::default(),
+    };
+    engine.handle(token_watcher_lib::watch::Message::Fs(lock_ev));
+    assert!(
+        engine.pending_files_contains(&jsonl_file),
+        "锁文件事件应成功联动 .jsonl 文件"
+    );
+
+    // 2. 模拟工具日志子目录文件事件到达
+    let tool_dir = proj_dir.join("2026-10-21T07-27-26-821Z_sess1");
+    fs::create_dir_all(&tool_dir).unwrap();
+    let tool_log = tool_dir.join("3.bash.log");
+    fs::write(&tool_log, "tool output").unwrap();
+    let tool_ev = Event {
+        kind: notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )),
+        paths: vec![tool_log],
+        attrs: Default::default(),
+    };
+    engine.handle(token_watcher_lib::watch::Message::Fs(tool_ev));
+    assert!(
+        engine.pending_files_contains(&jsonl_file),
+        "工具日志文件事件应成功联动对应 .jsonl 会话文件"
+    );
 }
 
 #[test]
 fn test_detect_engine_coverage() {
-    assert_eq!(detect_engine("opencode:ses_1:msg_1", "opencode"), "opencode");
-    assert_eq!(detect_engine("continue:ses_2:0:123", "continue"), "continue");
+    assert_eq!(
+        detect_engine("opencode:ses_1:msg_1", "opencode"),
+        "opencode"
+    );
+    assert_eq!(
+        detect_engine("continue:ses_2:0:123", "continue"),
+        "continue"
+    );
     assert_eq!(detect_engine("omp:ses_3:msg_2", "omp"), "omp");
     assert_eq!(detect_engine("cline:task_1:123:abc", "cline"), "cline");
     assert_eq!(detect_engine("roo:task_2:123:abc", "roo"), "roo");
     assert_eq!(detect_engine("aider:u1:123:abc", "aider"), "aider");
     assert_eq!(detect_engine("codex:s1:turn1", "codex"), "codex");
-    assert_eq!(detect_engine("11111111-1111-4111-8111-111111111111", "claude"), "claude");
+    assert_eq!(
+        detect_engine("11111111-1111-4111-8111-111111111111", "claude"),
+        "claude"
+    );
 }
 
 #[test]
@@ -277,7 +412,8 @@ fn test_data_engine_multi_source_v2_discovery() {
                 }
             })
         ),
-    ).unwrap();
+    )
+    .unwrap();
 
     // 3. OpenCode db
     let conn = rusqlite::Connection::open(&paths.opencode_db_path).unwrap();

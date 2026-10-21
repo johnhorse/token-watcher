@@ -101,7 +101,9 @@ pub fn run() {
             let claude_settings_path = paths.settings_path.clone();
             let data_dir = db_path.parent().unwrap_or(std::path::Path::new("."));
             let pricing = std::sync::Arc::new(core::pricing::PriceManager::new(data_dir));
-            pricing.clone().spawn_background_refresher(Some(app.handle().clone()));
+            pricing
+                .clone()
+                .spawn_background_refresher(Some(app.handle().clone()));
             let quota_syncer = std::sync::Arc::new(core::quota::QuotaSyncer::new(
                 db_path.clone(),
                 claude_settings_path.clone(),

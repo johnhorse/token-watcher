@@ -357,7 +357,17 @@ fn dashboard_serializes_to_contract_shape() {
     assert_eq!(value["range"], "today");
     assert_eq!(
         keys(&value),
-        ["cost", "models", "profiles", "pulses", "range", "sessions", "totals"]
+        [
+            "available_engines",
+            "cost",
+            "engine",
+            "models",
+            "profiles",
+            "pulses",
+            "range",
+            "sessions",
+            "totals",
+        ]
     );
     assert_eq!(
         keys(&value["totals"]),
@@ -386,7 +396,14 @@ fn dashboard_serializes_to_contract_shape() {
     );
     assert_eq!(
         keys(&value["sessions"][0]),
-        ["active", "engine", "last_active_ms", "session_id", "title", "total"]
+        [
+            "active",
+            "engine",
+            "last_active_ms",
+            "session_id",
+            "title",
+            "total"
+        ]
     );
     assert_eq!(value["sessions"][0]["engine"], "claude");
 

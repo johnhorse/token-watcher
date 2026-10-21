@@ -8,9 +8,9 @@
 //! 5. D29: Aider 30 分钟时间切片与独立会话化；
 //! 6. 聚合层 `detect_engine` 正确识别多引擎（"cline" | "roo" | "aider" | "claude" | "codex"），并支持会话飞行记录仪下钻。
 
+use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
-use serde_json::json;
 use token_watcher_lib::core::agg::{self, detect_engine};
 use token_watcher_lib::core::ingest;
 use token_watcher_lib::core::store::Store;
@@ -22,7 +22,11 @@ struct TempDir {
 
 impl TempDir {
     fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("tw-test-multi-source-{}-{}", name, std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "tw-test-multi-source-{}-{}",
+            name,
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         Self { path }
@@ -72,7 +76,8 @@ fn test_cline_and_roo_ingest_and_normalization() {
                 "apiProtocol": "anthropic"
             }).to_string()
         }
-    ]).to_string();
+    ])
+    .to_string();
     fs::write(cline_task_dir.join("ui_messages.json"), cline_ui_json).unwrap();
 
     let cline_history = r#"
@@ -80,7 +85,11 @@ fn test_cline_and_roo_ingest_and_normalization() {
     <model>claude-3-7-sonnet-20250219</model>
     </environment_details>
     "#;
-    fs::write(cline_task_dir.join("api_conversation_history.json"), cline_history).unwrap();
+    fs::write(
+        cline_task_dir.join("api_conversation_history.json"),
+        cline_history,
+    )
+    .unwrap();
 
     // 2. 模拟 Roo Code 任务目录（OpenAI 协议）
     let roo_task_dir = temp.path().join("roo_tasks").join("task-r1");
@@ -100,7 +109,8 @@ fn test_cline_and_roo_ingest_and_normalization() {
                 "apiProtocol": "openai"
             }).to_string()
         }
-    ]).to_string();
+    ])
+    .to_string();
     fs::write(roo_task_dir.join("ui_messages.json"), roo_ui_json).unwrap();
 
     let roo_history = r#"
@@ -108,10 +118,16 @@ fn test_cline_and_roo_ingest_and_normalization() {
     <model>deepseek-chat</model>
     </environment_details>
     "#;
-    fs::write(roo_task_dir.join("api_conversation_history.json"), roo_history).unwrap();
+    fs::write(
+        roo_task_dir.join("api_conversation_history.json"),
+        roo_history,
+    )
+    .unwrap();
 
     // 执行 ingest
-    let (stats_c, recs_c) = ingest::ingest_file_with_records(&mut store, &cline_task_dir.join("ui_messages.json")).unwrap();
+    let (stats_c, recs_c) =
+        ingest::ingest_file_with_records(&mut store, &cline_task_dir.join("ui_messages.json"))
+            .unwrap();
     assert_eq!(stats_c.records, 1);
     assert_eq!(recs_c.len(), 1);
     assert_eq!(recs_c[0].model, "claude-3-7-sonnet-20250219");
@@ -121,7 +137,9 @@ fn test_cline_and_roo_ingest_and_normalization() {
     assert_eq!(recs_c[0].cache_read_tokens, 2000);
     assert_eq!(recs_c[0].cache_creation_tokens, 500);
 
-    let (stats_r, recs_r) = ingest::ingest_file_with_records(&mut store, &roo_task_dir.join("ui_messages.json")).unwrap();
+    let (stats_r, recs_r) =
+        ingest::ingest_file_with_records(&mut store, &roo_task_dir.join("ui_messages.json"))
+            .unwrap();
     assert_eq!(stats_r.records, 1);
     assert_eq!(recs_r.len(), 1);
     assert_eq!(recs_r[0].model, "deepseek-chat");
@@ -132,11 +150,19 @@ fn test_cline_and_roo_ingest_and_normalization() {
     assert_eq!(recs_r[0].cache_creation_tokens, 1000);
 
     // 引擎识别断言
-    assert_eq!(detect_engine(&recs_c[0].record_id, &recs_c[0].entrypoint), "cline");
-    assert_eq!(detect_engine(&recs_r[0].record_id, &recs_r[0].entrypoint), "roo");
+    assert_eq!(
+        detect_engine(&recs_c[0].record_id, &recs_c[0].entrypoint),
+        "cline"
+    );
+    assert_eq!(
+        detect_engine(&recs_r[0].record_id, &recs_r[0].entrypoint),
+        "roo"
+    );
 
     // D26 稳定内容主键验证：再次调用 ingest，由于 mtime/size 未变，直接跳过
-    let (stats_c2, recs_c2) = ingest::ingest_file_with_records(&mut store, &cline_task_dir.join("ui_messages.json")).unwrap();
+    let (stats_c2, recs_c2) =
+        ingest::ingest_file_with_records(&mut store, &cline_task_dir.join("ui_messages.json"))
+            .unwrap();
     assert_eq!(stats_c2.records, 0);
     assert_eq!(recs_c2.len(), 0);
 }
@@ -157,7 +183,8 @@ fn test_aider_jsonl_ingest_and_sessionization() {
             "prompt_tokens": 1200,
             "completion_tokens": 150
         }
-    }).to_string();
+    })
+    .to_string();
     let l2 = json!({
         "event": "message_send",
         "user_id": "aid-usr-1234",
@@ -167,7 +194,8 @@ fn test_aider_jsonl_ingest_and_sessionization() {
             "prompt_tokens": 1500,
             "completion_tokens": 200
         }
-    }).to_string();
+    })
+    .to_string();
     let l3 = json!({
         "event": "message_send",
         "user_id": "aid-usr-1234",
@@ -177,7 +205,8 @@ fn test_aider_jsonl_ingest_and_sessionization() {
             "prompt_tokens": 800,
             "completion_tokens": 80
         }
-    }).to_string();
+    })
+    .to_string();
 
     fs::write(&aider_file, format!("{}\n{}\n{}\n", l1, l2, l3)).unwrap();
 
@@ -189,7 +218,10 @@ fn test_aider_jsonl_ingest_and_sessionization() {
     assert_eq!(recs[0].session_id, recs[1].session_id);
     assert_ne!(recs[0].session_id, recs[2].session_id);
     assert_eq!(recs[0].entrypoint, "aider");
-    assert_eq!(detect_engine(&recs[0].record_id, &recs[0].entrypoint), "aider");
+    assert_eq!(
+        detect_engine(&recs[0].record_id, &recs[0].entrypoint),
+        "aider"
+    );
     assert_eq!(recs[0].model, "gpt-5.2");
     assert_eq!(recs[2].model, "gemini-3-flash");
 }
@@ -215,8 +247,13 @@ fn test_attribution_isolation_and_flight_recorder() {
                 "output_tokens": 100
             }
         }
-    }).to_string();
-    fs::write(claude_dir.join("session.jsonl"), format!("{}\n", claude_line)).unwrap();
+    })
+    .to_string();
+    fs::write(
+        claude_dir.join("session.jsonl"),
+        format!("{}\n", claude_line),
+    )
+    .unwrap();
 
     // 写入 Cline 任务
     let cline_dir = paths.cline_tasks_root.join("cline-task-99");
@@ -234,9 +271,14 @@ fn test_attribution_isolation_and_flight_recorder() {
                 "apiProtocol": "anthropic"
             }).to_string()
         }
-    ]).to_string();
+    ])
+    .to_string();
     fs::write(cline_dir.join("ui_messages.json"), cline_ui).unwrap();
-    fs::write(cline_dir.join("api_conversation_history.json"), "<environment_details><model>claude-3-7-sonnet</model></environment_details>").unwrap();
+    fs::write(
+        cline_dir.join("api_conversation_history.json"),
+        "<environment_details><model>claude-3-7-sonnet</model></environment_details>",
+    )
+    .unwrap();
 
     // 触发 initial_scan
     engine.initial_scan();
@@ -248,19 +290,34 @@ fn test_attribution_isolation_and_flight_recorder() {
 
     // 会话列表中应同时存在 Claude 与 Cline，且分别打上正确的 engine 标识
     assert_eq!(dash.sessions.len(), 2);
-    let s_claude = dash.sessions.iter().find(|s| s.engine == "claude").expect("应包含 Claude 会话");
-    let s_cline = dash.sessions.iter().find(|s| s.engine == "cline").expect("应包含 Cline 会话");
+    let s_claude = dash
+        .sessions
+        .iter()
+        .find(|s| s.engine == "claude")
+        .expect("应包含 Claude 会话");
+    let s_cline = dash
+        .sessions
+        .iter()
+        .find(|s| s.engine == "cline")
+        .expect("应包含 Cline 会话");
     assert_eq!(s_claude.title, "p1");
     assert_eq!(s_cline.title, "cline-ta");
 
     // D28 归因隔离检查：查询数据库，cline 记录的 profile_id 必须为 NULL
     let direct_conn = rusqlite::Connection::open(&paths.db_path).unwrap();
-    let mut check_stmt = direct_conn.prepare("SELECT profile_id FROM usage_records WHERE record_id LIKE 'cline:%'").unwrap();
+    let mut check_stmt = direct_conn
+        .prepare("SELECT profile_id FROM usage_records WHERE record_id LIKE 'cline:%'")
+        .unwrap();
     let cline_profile_id: Option<i64> = check_stmt.query_row([], |row| row.get(0)).unwrap();
-    assert_eq!(cline_profile_id, None, "D28: 新引擎记录绝不可污染用户 Claude 订阅 profile_id");
+    assert_eq!(
+        cline_profile_id, None,
+        "D28: 新引擎记录绝不可污染用户 Claude 订阅 profile_id"
+    );
 
     // Flight Recorder 下钻验证
-    let fr = agg::session_flight_recorder(&store, None, "cline-task-99", None, now_ms).unwrap().expect("应能下钻");
+    let fr = agg::session_flight_recorder(&store, None, "cline-task-99", None, now_ms)
+        .unwrap()
+        .expect("应能下钻");
     assert_eq!(fr.engine, "cline");
     assert_eq!(fr.title, "cline-ta");
     assert_eq!(fr.totals.input, 2500);

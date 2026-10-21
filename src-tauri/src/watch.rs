@@ -76,7 +76,9 @@ impl DataPaths {
         let global_storage = home.join(".config/Code/User/globalStorage");
 
         let cline_tasks_root = global_storage.join("saoudrizwan.claude-dev").join("tasks");
-        let roo_tasks_root = global_storage.join("rooveterinaryinc.roo-cline").join("tasks");
+        let roo_tasks_root = global_storage
+            .join("rooveterinaryinc.roo-cline")
+            .join("tasks");
 
         let aider_analytics_path = if home.join(".aider/analytics.jsonl").exists() {
             home.join(".aider/analytics.jsonl")
@@ -242,16 +244,19 @@ impl EventSink for TauriSink {
 
     fn window_shown(&self) {
         let snap_opt = if let Some(state) = self.app.try_state::<crate::AppState>() {
-            state.status.lock().ok().map(|s| (s.phase.clone(), s.files_done, s.files_total))
+            state
+                .status
+                .lock()
+                .ok()
+                .map(|s| (s.phase.clone(), s.files_done, s.files_total))
         } else {
             None
         };
         if let Some((phase, done, total)) = snap_opt {
             if !phase.is_empty() && self.is_visible() {
-                let _ = self.app.emit(
-                    "scan-progress",
-                    &progress_json(&phase, done, total),
-                );
+                let _ = self
+                    .app
+                    .emit("scan-progress", &progress_json(&phase, done, total));
             }
         }
     }
@@ -333,6 +338,8 @@ pub struct DataEngine<S: EventSink> {
     codex_dir_canonical: Option<PathBuf>,
     cline_tasks_root_canonical: Option<PathBuf>,
     roo_tasks_root_canonical: Option<PathBuf>,
+    omp_sessions_root_canonical: Option<PathBuf>,
+    continue_sessions_root_canonical: Option<PathBuf>,
     sink: S,
     /// 由 notify 回调持有；Drop 即停止监听
     watcher: Option<RecommendedWatcher>,
@@ -372,6 +379,8 @@ impl<S: EventSink> DataEngine<S> {
         let codex_dir_canonical = fs::canonicalize(&paths.codex_dir).ok();
         let cline_tasks_root_canonical = fs::canonicalize(&paths.cline_tasks_root).ok();
         let roo_tasks_root_canonical = fs::canonicalize(&paths.roo_tasks_root).ok();
+        let omp_sessions_root_canonical = fs::canonicalize(&paths.omp_sessions_root).ok();
+        let continue_sessions_root_canonical = fs::canonicalize(&paths.continue_sessions_root).ok();
 
         let mut watcher =
             match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
@@ -475,13 +484,13 @@ impl<S: EventSink> DataEngine<S> {
                 }
             }
             if paths.opencode_db_path.exists() {
-                let target = paths.opencode_db_path.parent().unwrap_or(&paths.opencode_db_path);
+                let target = paths
+                    .opencode_db_path
+                    .parent()
+                    .unwrap_or(&paths.opencode_db_path);
                 match w.watch(target, RecursiveMode::NonRecursive) {
                     Ok(()) => opencode_watched = true,
-                    Err(e) => eprintln!(
-                        "[token-watcher] 监听 {} 失败: {e}",
-                        target.display()
-                    ),
+                    Err(e) => eprintln!("[token-watcher] 监听 {} 失败: {e}", target.display()),
                 }
             }
         }
@@ -513,6 +522,8 @@ impl<S: EventSink> DataEngine<S> {
             codex_dir_canonical,
             cline_tasks_root_canonical,
             roo_tasks_root_canonical,
+            omp_sessions_root_canonical,
+            continue_sessions_root_canonical,
             sink,
             watcher,
             projects_watched,
@@ -537,6 +548,10 @@ impl<S: EventSink> DataEngine<S> {
         };
         engine.apply_initial_settings();
         engine
+    }
+    /// 检查指定文件是否处于去抖待处理队列中（测试与诊断用）
+    pub fn pending_files_contains(&self, path: &Path) -> bool {
+        self.pending_files.contains(path)
     }
 
     /// 启动时先把当前 settings 应用到时间线（在首扫之前），
@@ -567,7 +582,11 @@ impl<S: EventSink> DataEngine<S> {
 
         if self.paths.codex_config_path.exists() {
             if let Ok(text) = fs::read_to_string(&self.paths.codex_config_path) {
-                if let SettingsSnapshot::Profile { endpoint, fingerprint } = attr::parse_codex_config(&text) {
+                if let SettingsSnapshot::Profile {
+                    endpoint,
+                    fingerprint,
+                } = attr::parse_codex_config(&text)
+                {
                     if let Some(store) = self.store.as_mut() {
                         let _ = store.ensure_profile(&endpoint, fingerprint.as_deref());
                     }
@@ -888,11 +907,43 @@ impl<S: EventSink> DataEngine<S> {
                     || path.file_name().and_then(|n| n.to_str()) == Some("opencode.db")
                     || path.file_name().and_then(|n| n.to_str()) == Some("opencode.db-wal")
                 {
-                    self.pending_files.insert(self.paths.opencode_db_path.clone());
+                    self.pending_files
+                        .insert(self.paths.opencode_db_path.clone());
                 } else {
                     self.pending_files.insert(path.clone());
                 }
                 relevant = true;
+            } else if path.is_dir() {
+                if self.collect_dir_sources(path) {
+                    relevant = true;
+                }
+            } else if self.under_omp(path) {
+                // omp 专有文件联动：
+                // 1) 锁文件 .<session>.jsonl.lock.os 联动对应 <session>.jsonl
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if file_name.ends_with(".lock.os") && file_name.contains(".jsonl") {
+                        let stripped = file_name
+                            .trim_start_matches('.')
+                            .trim_end_matches(".lock.os");
+                        if stripped.ends_with(".jsonl") {
+                            if let Some(parent) = path.parent() {
+                                let jsonl = parent.join(stripped);
+                                if jsonl.is_file() {
+                                    self.pending_files.insert(jsonl);
+                                    relevant = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                // 2) 工具日志子目录 <session>/<tool>.log 联动对应 <session>.jsonl
+                if let Some(parent) = path.parent() {
+                    let candidate = parent.with_extension("jsonl");
+                    if candidate.is_file() && self.under_omp(&candidate) {
+                        self.pending_files.insert(candidate);
+                        relevant = true;
+                    }
+                }
             }
             if self.is_settings_event(path) || self.is_codex_config_event(path) {
                 self.settings_dirty = true;
@@ -916,9 +967,7 @@ impl<S: EventSink> DataEngine<S> {
                 self.needs_catchup = true;
                 relevant = true;
             }
-            if !self.roo_tasks_watched
-                && self.is_roo_tasks_root(path)
-                && self.try_watch_roo_tasks()
+            if !self.roo_tasks_watched && self.is_roo_tasks_root(path) && self.try_watch_roo_tasks()
             {
                 self.needs_catchup = true;
                 relevant = true;
@@ -946,7 +995,12 @@ impl<S: EventSink> DataEngine<S> {
             }
             if !self.opencode_watched
                 && (path == &self.paths.opencode_db_path
-                    || path.starts_with(self.paths.opencode_db_path.parent().unwrap_or(&self.paths.opencode_db_path)))
+                    || path.starts_with(
+                        self.paths
+                            .opencode_db_path
+                            .parent()
+                            .unwrap_or(&self.paths.opencode_db_path),
+                    ))
                 && self.try_watch_opencode()
             {
                 self.needs_catchup = true;
@@ -1017,19 +1071,34 @@ impl<S: EventSink> DataEngine<S> {
         }
     }
 
-
     fn under_omp(&self, path: &Path) -> bool {
-        path.starts_with(&self.paths.omp_sessions_root)
+        if path.starts_with(&self.paths.omp_sessions_root) {
+            return true;
+        }
+        match (&self.omp_sessions_root_canonical, fs::canonicalize(path)) {
+            (Some(root), Ok(canonical)) => canonical.starts_with(root),
+            _ => false,
+        }
     }
 
     fn under_continue(&self, path: &Path) -> bool {
-        path.starts_with(&self.paths.continue_sessions_root)
+        if path.starts_with(&self.paths.continue_sessions_root) {
+            return true;
+        }
+        match (
+            &self.continue_sessions_root_canonical,
+            fs::canonicalize(path),
+        ) {
+            (Some(root), Ok(canonical)) => canonical.starts_with(root),
+            _ => false,
+        }
     }
 
     fn is_source_event(&self, path: &Path) -> bool {
         let is_jsonl = path.extension().and_then(|e| e.to_str()) == Some("jsonl");
         let is_ui_messages = path.file_name().and_then(|n| n.to_str()) == Some("ui_messages.json");
-        let is_continue = path.extension().and_then(|e| e.to_str()) == Some("json") && self.under_continue(path);
+        let is_continue =
+            path.extension().and_then(|e| e.to_str()) == Some("json") && self.under_continue(path);
         let is_opencode = path == self.paths.opencode_db_path
             || path.file_name().and_then(|n| n.to_str()) == Some("opencode.db")
             || path.file_name().and_then(|n| n.to_str()) == Some("opencode.db-wal");
@@ -1061,6 +1130,51 @@ impl<S: EventSink> DataEngine<S> {
             (Some(root), Ok(canonical)) => canonical == *root,
             _ => false,
         }
+    }
+
+    /// 目录级变更事件处理（应对 macOS FSEvents 批量写聚合）：
+    /// 自动提取该目录下对应引擎的有效源文件加入待读取队列。
+    fn collect_dir_sources(&mut self, path: &Path) -> bool {
+        let mut found = false;
+        if self.under_codex(path) && !self.is_codex_sessions_root(path) {
+            let before = self.pending_files.len();
+            collect_jsonl_recursive(path, 3, &mut self.pending_files);
+            found = self.pending_files.len() > before;
+        } else if (self.under_projects(path) && !self.is_projects_root(path))
+            || self.under_omp(path)
+        {
+            let before = self.pending_files.len();
+            collect_jsonl_recursive(path, 2, &mut self.pending_files);
+            found = self.pending_files.len() > before;
+        } else if (self.under_cline(path) || self.under_roo(path))
+            && !self.is_cline_tasks_root(path)
+            && !self.is_roo_tasks_root(path)
+        {
+            let ui_msg = path.join("ui_messages.json");
+            if ui_msg.is_file() {
+                self.pending_files.insert(ui_msg);
+                found = true;
+            } else if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let candidate = entry.path().join("ui_messages.json");
+                    if candidate.is_file() {
+                        self.pending_files.insert(candidate);
+                        found = true;
+                    }
+                }
+            }
+        } else if self.under_continue(path) {
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("json") {
+                        self.pending_files.insert(p);
+                        found = true;
+                    }
+                }
+            }
+        }
+        found
     }
 
     /// settings 相关事件：目标文件本身，或 ~/.claude 下名字含 "settings" 的直接子项
@@ -1167,7 +1281,10 @@ impl<S: EventSink> DataEngine<S> {
         let Some(watcher) = self.watcher.as_mut() else {
             return false;
         };
-        match watcher.watch(&self.paths.aider_analytics_path, RecursiveMode::NonRecursive) {
+        match watcher.watch(
+            &self.paths.aider_analytics_path,
+            RecursiveMode::NonRecursive,
+        ) {
             Ok(()) => {
                 self.aider_watched = true;
                 eprintln!("[token-watcher] 检测到 aider analytics 文件，已开始监听");
@@ -1218,7 +1335,11 @@ impl<S: EventSink> DataEngine<S> {
         let Some(watcher) = self.watcher.as_mut() else {
             return false;
         };
-        let target = self.paths.opencode_db_path.parent().unwrap_or(&self.paths.opencode_db_path);
+        let target = self
+            .paths
+            .opencode_db_path
+            .parent()
+            .unwrap_or(&self.paths.opencode_db_path);
         match watcher.watch(target, RecursiveMode::NonRecursive) {
             Ok(()) => {
                 self.opencode_watched = true;
@@ -1257,7 +1378,9 @@ impl<S: EventSink> DataEngine<S> {
             Ok(text) => attr::parse_settings(&text),
             Err(_) => SettingsSnapshot::NoAttribution,
         };
-        if snapshot != SettingsSnapshot::Unreadable && self.last_snapshot.as_ref() != Some(&snapshot) {
+        if snapshot != SettingsSnapshot::Unreadable
+            && self.last_snapshot.as_ref() != Some(&snapshot)
+        {
             if let Some(store) = self.store.as_mut() {
                 match store.apply_settings_snapshot(&snapshot, now_ms()) {
                     Ok(outcome) => {
@@ -1278,7 +1401,11 @@ impl<S: EventSink> DataEngine<S> {
 
         if self.paths.codex_config_path.exists() {
             if let Ok(text) = fs::read_to_string(&self.paths.codex_config_path) {
-                if let SettingsSnapshot::Profile { endpoint, fingerprint } = attr::parse_codex_config(&text) {
+                if let SettingsSnapshot::Profile {
+                    endpoint,
+                    fingerprint,
+                } = attr::parse_codex_config(&text)
+                {
                     if let Some(store) = self.store.as_mut() {
                         let _ = store.ensure_profile(&endpoint, fingerprint.as_deref());
                     }
@@ -1383,7 +1510,8 @@ impl<S: EventSink> DataEngine<S> {
         }
         // 根目录之前不可读 → 趁机重试一次（不引入轮询）
         // 重新探测启动时可能未安装/不存在的目录（解决 F5 盲区）
-        if !self.projects_watched && self.paths.projects_root.exists() && self.try_watch_projects() {
+        if !self.projects_watched && self.paths.projects_root.exists() && self.try_watch_projects()
+        {
             self.needs_catchup = true;
         }
         if !self.codex_sessions_watched
@@ -1404,9 +1532,7 @@ impl<S: EventSink> DataEngine<S> {
         {
             self.needs_catchup = true;
         }
-        if !self.aider_watched
-            && self.paths.aider_analytics_path.exists()
-            && self.try_watch_aider()
+        if !self.aider_watched && self.paths.aider_analytics_path.exists() && self.try_watch_aider()
         {
             self.needs_catchup = true;
         }
@@ -1515,9 +1641,18 @@ impl<S: EventSink> DataEngine<S> {
     fn push_event(&mut self, event: &str, payload: Value) {
         if event == "scan-progress" {
             let phase = payload.get("phase").and_then(Value::as_str).unwrap_or("");
-            let done = payload.get("files_done").and_then(Value::as_u64).unwrap_or(0);
-            let total = payload.get("files_total").and_then(Value::as_u64).unwrap_or(0);
-            let percent = payload.get("percent").and_then(Value::as_f64).unwrap_or(0.0);
+            let done = payload
+                .get("files_done")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let total = payload
+                .get("files_total")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let percent = payload
+                .get("percent")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
             self.sink.status_changed(phase, done, total, percent);
         }
         if self.sink.is_visible() {
@@ -1614,4 +1749,27 @@ pub fn spawn(app: AppHandle, paths: DataPaths, tray_tx: Sender<TrayCommand>) -> 
         .map_err(|e| eprintln!("[token-watcher] 数据线程启动失败: {e}"))
         .ok();
     DataHandle { tx, join }
+}
+
+/// 递归收集指定目录层级内的所有 .jsonl 文件
+fn collect_jsonl_recursive(
+    dir: &Path,
+    max_depth: usize,
+    out: &mut std::collections::HashSet<PathBuf>,
+) {
+    if max_depth == 0 {
+        return;
+    }
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                    out.insert(p);
+                }
+            } else if p.is_dir() && max_depth > 1 {
+                collect_jsonl_recursive(&p, max_depth - 1, out);
+            }
+        }
+    }
 }

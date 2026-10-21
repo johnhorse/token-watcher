@@ -459,7 +459,10 @@ async fn test_quota_client_live_mock_server() {
     });
 
     let client = QuotaClient::new();
-    let res = client.fetch_quota(&mock_base, "sk-test-mock").await.unwrap();
+    let res = client
+        .fetch_quota(&mock_base, "sk-test-mock")
+        .await
+        .unwrap();
 
     assert_eq!(res.total, Some(50.0));
     assert_eq!(res.used, Some(15.5));
@@ -488,14 +491,9 @@ async fn test_quota_syncer_ssrf_and_credential_borrowing() {
     let pid_active = create_profile(&mut store, "https://api.active.com", 1000);
     store
         .update_profile_quota_config(
-            pid_active,
-            "api",
-            "usd",
-            None, // 未配 url => 继承 endpoint
+            pid_active, "api", "usd", None, // 未配 url => 继承 endpoint
             None, // 未配独立 key => 借用 settings
-            None,
-            None,
-            None,
+            None, None, None,
         )
         .unwrap();
 
@@ -503,14 +501,8 @@ async fn test_quota_syncer_ssrf_and_credential_borrowing() {
     let pid_other = create_profile(&mut store, "https://api.other.com", 2000);
     store
         .update_profile_quota_config(
-            pid_other,
-            "api",
-            "usd",
-            None,
-            None, // 无独立 key
-            None,
-            None,
-            None,
+            pid_other, "api", "usd", None, None, // 无独立 key
+            None, None, None,
         )
         .unwrap();
 

@@ -624,7 +624,10 @@ experimental_bearer_token = "secret-token-123"
 "#;
         let snap = parse_codex_config(custom_toml);
         match snap {
-            SettingsSnapshot::Profile { endpoint, fingerprint: fp } => {
+            SettingsSnapshot::Profile {
+                endpoint,
+                fingerprint: fp,
+            } => {
                 assert_eq!(endpoint, "http://127.0.0.1:15721");
                 assert!(fp.is_some());
                 assert_eq!(default_display_name(&endpoint), "本地代理 (15721)");
@@ -638,12 +641,15 @@ model_provider = "openai"
 "#;
         let snap_off = parse_codex_config(official_toml);
         match snap_off {
-            SettingsSnapshot::Profile { endpoint, fingerprint: fp } => {
+            SettingsSnapshot::Profile {
+                endpoint,
+                fingerprint: fp,
+            } => {
                 assert_eq!(endpoint, "https://api.openai.com");
                 assert!(fp.is_none());
                 assert_eq!(default_display_name(&endpoint), "OpenAI 官方");
             }
             other => panic!("预期 Profile，实际: {:?}", other),
         }
-}
     }
+}

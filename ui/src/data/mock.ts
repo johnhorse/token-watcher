@@ -263,7 +263,7 @@ function buildProfiles(range: Range, totals: TokenTotals): ProfileCard[] {
   return known.sort((a, b) => b.tokens.total - a.tokens.total);
 }
 
-function buildDashboard(range: Range): Dashboard {
+function buildDashboard(range: Range, engine?: string | null): Dashboard {
   const totals = buildTotals(range);
   const delta = liveTotal();
 
@@ -299,8 +299,19 @@ function buildDashboard(range: Range): Dashboard {
     .map((pulse) => ({ ...pulse }));
 
   const totalCost = Math.round(totals.total * 0.0000052 * 100) / 100;
+  const available_engines = [
+    { engine: "claude", tokens: Math.round(totals.total * 0.45) },
+    { engine: "codex", tokens: Math.round(totals.total * 0.25) },
+    { engine: "opencode", tokens: Math.round(totals.total * 0.15) },
+    { engine: "continue", tokens: Math.round(totals.total * 0.15) },
+  ];
+  const filteredSessions = engine && engine !== "all"
+    ? sessions.filter((s) => s.engine === engine)
+    : sessions;
+
   return {
     range,
+    engine: engine || null,
     totals,
     cost: {
       total: totalCost,
@@ -311,7 +322,8 @@ function buildDashboard(range: Range): Dashboard {
     pulses: windowPulses,
     models,
     profiles: buildProfiles(range, totals),
-    sessions,
+    sessions: filteredSessions,
+    available_engines,
   };
 }
 
@@ -564,12 +576,12 @@ export function createMockAdapter(): UiAdapter {
   schedulePulse(1800);
 
   return {
-    async getDashboard(range) {
+    async getDashboard(range, engine) {
       if (remainingFailures > 0) {
         remainingFailures -= 1;
         throw new Error("mock: get_dashboard failed");
       }
-      return buildDashboard(range);
+      return buildDashboard(range, engine);
     },
 
     async getScanStatus() {

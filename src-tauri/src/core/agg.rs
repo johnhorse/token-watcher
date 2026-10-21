@@ -15,11 +15,11 @@
 //! 内有新 usage 记录的会话；多会话并行时取**最近一条** usage 记录所属会话
 //! （不求和）。无活跃会话回退今日累计。
 
-use rusqlite::{params, OptionalExtension};
-use serde::{Deserialize, Serialize};
 use super::pricing::{PriceTable, TokenCost};
 use super::store::{Store, Totals};
 use super::CoreError;
+use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
 /// 激活会话判定窗口（5 分钟）。
 /// 与 `attr::GRACE_MS` 当前同值但语义独立：两者同属 OQ4 的可调旋钮。
 pub const ACTIVE_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -93,8 +93,8 @@ pub struct ModelSlice {
 /// 配额信息（支持手动 Token 计数与中转站 API 自动同步）
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct QuotaInfo {
-    pub quota_type: String,          // "manual" | "api"
-    pub unit: String,                // "usd" | "tokens" | "cny"
+    pub quota_type: String, // "manual" | "api"
+    pub unit: String,       // "usd" | "tokens" | "cny"
     pub total: Option<f64>,
     pub used: Option<f64>,
     pub reset_date: Option<String>,
@@ -129,16 +129,25 @@ pub struct SessionRow {
     pub engine: String,
 }
 
+/// 引擎切片信息（引擎名 + 该时段内的 Token 总数）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EngineSlice {
+    pub engine: String,
+    pub tokens: i64,
+}
+
 /// 悬浮窗一次水合的全部数据（契约 `Dashboard`）
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Dashboard {
     pub range: Range,
+    pub engine: Option<String>,
     pub totals: TokenTotals,
     pub cost: TokenCost,
     pub pulses: Vec<UsagePulse>,
     pub models: Vec<ModelSlice>,
     pub profiles: Vec<ProfileCard>,
     pub sessions: Vec<SessionRow>,
+    pub available_engines: Vec<EngineSlice>,
 }
 /// 桌面角落 HUD 紧凑概览数据（< 1ms 轻量查询）
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -248,7 +257,7 @@ pub fn now_ms() -> i64 {
 
 /// 聚合 Dashboard（使用系统当前时间，默认内置价目表）
 pub fn dashboard(store: &Store, range: Range) -> Result<Dashboard, CoreError> {
-    dashboard_at_with_prices(store, range, now_ms(), None)
+    dashboard_at_with_prices_and_engine(store, range, now_ms(), None, None)
 }
 
 /// 聚合 Dashboard（使用系统当前时间，支持注入外部价目表）
@@ -257,12 +266,23 @@ pub fn dashboard_with_prices(
     range: Range,
     prices: Option<&PriceTable>,
 ) -> Result<Dashboard, CoreError> {
-    dashboard_at_with_prices(store, range, now_ms(), prices)
+    dashboard_at_with_prices_and_engine(store, range, now_ms(), prices, None)
 }
+
+/// 聚合 Dashboard（使用系统当前时间，支持注入外部价目表与引擎筛选）
+pub fn dashboard_with_prices_and_engine(
+    store: &Store,
+    range: Range,
+    prices: Option<&PriceTable>,
+    engine: Option<&str>,
+) -> Result<Dashboard, CoreError> {
+    dashboard_at_with_prices_and_engine(store, range, now_ms(), prices, engine)
+}
+
 /// 同上，`now_ms` 显式传入（测试可注入固定时钟，默认使用内置兜底价目表）；
 /// 脉冲窗口与「活跃」判定都以它为准。
 pub fn dashboard_at(store: &Store, range: Range, now_ms: i64) -> Result<Dashboard, CoreError> {
-    dashboard_at_with_prices(store, range, now_ms, None)
+    dashboard_at_with_prices_and_engine(store, range, now_ms, None, None)
 }
 
 /// 支持注入外部价目表的聚合函数
@@ -272,8 +292,22 @@ pub fn dashboard_at_with_prices(
     now_ms: i64,
     prices: Option<&PriceTable>,
 ) -> Result<Dashboard, CoreError> {
+    dashboard_at_with_prices_and_engine(store, range, now_ms, prices, None)
+}
+
+/// 支持注入外部价目表与引擎筛选的聚合函数
+pub fn dashboard_at_with_prices_and_engine(
+    store: &Store,
+    range: Range,
+    now_ms: i64,
+    prices: Option<&PriceTable>,
+    engine: Option<&str>,
+) -> Result<Dashboard, CoreError> {
     let (start_ms, end_ms) = range_bounds(store, range, now_ms)?;
-    let totals = token_totals(store.totals_between(start_ms, end_ms)?);
+    let available_engines = available_engines_between(store, start_ms, end_ms)?;
+
+    let clean_engine = engine.filter(|e| !e.is_empty() && *e != "all");
+    let totals = token_totals(store.totals_between_with_engine(start_ms, end_ms, clean_engine)?);
     let default_table;
     let prices = match prices {
         Some(p) => p,
@@ -283,8 +317,8 @@ pub fn dashboard_at_with_prices(
         }
     };
     let (models, priced_tokens, total_cost, unpriced_tokens) =
-        models_between(store, start_ms, end_ms, prices)?;
-    let profiles = profiles_between(store, start_ms, end_ms, prices)?;
+        models_between(store, start_ms, end_ms, prices, clean_engine)?;
+    let profiles = profiles_between(store, start_ms, end_ms, prices, clean_engine)?;
 
     let total_tokens = totals.total;
     let coverage = if total_tokens == 0 {
@@ -301,13 +335,114 @@ pub fn dashboard_at_with_prices(
 
     Ok(Dashboard {
         range,
+        engine: clean_engine.map(str::to_string),
         totals,
         cost,
-        pulses: recent_pulses(store, now_ms)?,
+        pulses: recent_pulses_with_engine(store, now_ms, clean_engine)?,
         models,
         profiles,
-        sessions: sessions_between(store, start_ms, end_ms, now_ms)?,
+        sessions: sessions_between(store, start_ms, end_ms, now_ms, clean_engine)?,
+        available_engines,
     })
+}
+
+/// 生成基于引擎筛选的 SQL WHERE 子句
+pub fn sql_engine_where(engine: Option<&str>) -> &'static str {
+    match engine {
+        Some("codex") => " AND (record_id LIKE 'codex:%' OR entrypoint = 'codex')",
+        Some("cline") => " AND (record_id LIKE 'cline:%' OR entrypoint = 'cline')",
+        Some("roo") => " AND (record_id LIKE 'roo:%' OR entrypoint = 'roo')",
+        Some("aider") => " AND (record_id LIKE 'aider:%' OR entrypoint = 'aider')",
+        Some("opencode") => " AND (record_id LIKE 'opencode:%' OR entrypoint = 'opencode')",
+        Some("continue") => " AND (record_id LIKE 'continue:%' OR entrypoint = 'continue')",
+        Some("omp") => " AND (record_id LIKE 'omp:%' OR entrypoint = 'omp')",
+        Some("claude") => {
+            " AND NOT (record_id LIKE 'codex:%' OR entrypoint = 'codex' \
+                     OR record_id LIKE 'cline:%' OR entrypoint = 'cline' \
+                     OR record_id LIKE 'roo:%' OR entrypoint = 'roo' \
+                     OR record_id LIKE 'aider:%' OR entrypoint = 'aider' \
+                     OR record_id LIKE 'opencode:%' OR entrypoint = 'opencode' \
+                     OR record_id LIKE 'continue:%' OR entrypoint = 'continue' \
+                     OR record_id LIKE 'omp:%' OR entrypoint = 'omp')"
+        }
+        _ => "",
+    }
+}
+
+/// 生成带有表别名的引擎筛选 SQL WHERE 子句
+pub fn sql_engine_where_alias(engine: Option<&str>, alias: &str) -> String {
+    match engine {
+        Some("codex") => {
+            format!(" AND ({alias}.record_id LIKE 'codex:%' OR {alias}.entrypoint = 'codex')")
+        }
+        Some("cline") => {
+            format!(" AND ({alias}.record_id LIKE 'cline:%' OR {alias}.entrypoint = 'cline')")
+        }
+        Some("roo") => {
+            format!(" AND ({alias}.record_id LIKE 'roo:%' OR {alias}.entrypoint = 'roo')")
+        }
+        Some("aider") => {
+            format!(" AND ({alias}.record_id LIKE 'aider:%' OR {alias}.entrypoint = 'aider')")
+        }
+        Some("opencode") => {
+            format!(" AND ({alias}.record_id LIKE 'opencode:%' OR {alias}.entrypoint = 'opencode')")
+        }
+        Some("continue") => {
+            format!(" AND ({alias}.record_id LIKE 'continue:%' OR {alias}.entrypoint = 'continue')")
+        }
+        Some("omp") => {
+            format!(" AND ({alias}.record_id LIKE 'omp:%' OR {alias}.entrypoint = 'omp')")
+        }
+        Some("claude") => {
+            format!(
+                " AND NOT ({alias}.record_id LIKE 'codex:%' OR {alias}.entrypoint = 'codex' \
+                         OR {alias}.record_id LIKE 'cline:%' OR {alias}.entrypoint = 'cline' \
+                         OR {alias}.record_id LIKE 'roo:%' OR {alias}.entrypoint = 'roo' \
+                         OR {alias}.record_id LIKE 'aider:%' OR {alias}.entrypoint = 'aider' \
+                         OR {alias}.record_id LIKE 'opencode:%' OR {alias}.entrypoint = 'opencode' \
+                         OR {alias}.record_id LIKE 'continue:%' OR {alias}.entrypoint = 'continue' \
+                         OR {alias}.record_id LIKE 'omp:%' OR {alias}.entrypoint = 'omp')"
+            )
+        }
+        _ => String::new(),
+    }
+}
+
+/// 统计在指定时间区间内实际产生 Token 的所有引擎
+pub fn available_engines_between(
+    store: &Store,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Vec<EngineSlice>, CoreError> {
+    let sql = "SELECT record_id, entrypoint,
+                      SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens) AS tokens
+               FROM usage_records
+               WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2
+               GROUP BY CASE
+                   WHEN record_id LIKE 'codex:%' OR entrypoint = 'codex' THEN 'codex'
+                   WHEN record_id LIKE 'cline:%' OR entrypoint = 'cline' THEN 'cline'
+                   WHEN record_id LIKE 'roo:%' OR entrypoint = 'roo' THEN 'roo'
+                   WHEN record_id LIKE 'aider:%' OR entrypoint = 'aider' THEN 'aider'
+                   WHEN record_id LIKE 'opencode:%' OR entrypoint = 'opencode' THEN 'opencode'
+                   WHEN record_id LIKE 'continue:%' OR entrypoint = 'continue' THEN 'continue'
+                   WHEN record_id LIKE 'omp:%' OR entrypoint = 'omp' THEN 'omp'
+                   ELSE 'claude'
+               END
+               HAVING tokens > 0
+               ORDER BY tokens DESC";
+    let mut stmt = store.conn().prepare_cached(sql)?;
+    let rows = stmt.query_map(params![start_ms, end_ms], |row| {
+        let record_id: String = row.get(0)?;
+        let entrypoint: String = row.get(1)?;
+        let tokens: i64 = row.get(2)?;
+        let engine = detect_engine(&record_id, &entrypoint).to_string();
+        Ok(EngineSlice { engine, tokens })
+    })?;
+    let mut result = Vec::new();
+    for r in rows {
+        result.push(r?);
+    }
+    Ok(result)
 }
 /// 托盘数字（使用系统当前时间）
 pub fn tray_metric(store: &Store, metric: TrayMetric) -> Result<i64, CoreError> {
@@ -342,15 +477,13 @@ pub fn tray_metric_at(store: &Store, metric: TrayMetric, now_ms: i64) -> Result<
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )?
             }
-            _ => {
-                store.conn().query_row(
-                    "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_read_tokens), 0)
+            _ => store.conn().query_row(
+                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_read_tokens), 0)
                      FROM usage_records
                      WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2",
-                    params![start_ms, end_ms],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )?
-            }
+                params![start_ms, end_ms],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?,
         };
         let denom = input + cache_read;
         return if denom > 0 {
@@ -397,7 +530,12 @@ pub fn hud_summary_at(
     hud_locked: bool,
     now_ms: i64,
 ) -> Result<HudSummary, CoreError> {
-    hud_summary_with_metrics_at(store, hud_locked, &crate::app_settings::default_hud_metrics(), now_ms)
+    hud_summary_with_metrics_at(
+        store,
+        hud_locked,
+        &crate::app_settings::default_hud_metrics(),
+        now_ms,
+    )
 }
 
 /// HUD 紧凑数据（带指标列表定制）
@@ -427,18 +565,17 @@ pub fn hud_summary_with_metrics_at(
              ORDER BY last_ts DESC
              LIMIT 1",
         )?;
-        stmt
-            .query_row(params![start_ms, end_ms], |row| {
-                let session_id: String = row.get(0)?;
-                let last_ts: i64 = row.get(1)?;
-                let model: String = row.get(2)?;
-                let input: i64 = row.get(3)?;
-                let output: i64 = row.get(4)?;
-                let cache_read: i64 = row.get(5)?;
-                let total: i64 = row.get(6)?;
-                Ok((session_id, last_ts, model, input, output, cache_read, total))
-            })
-            .ok()
+        stmt.query_row(params![start_ms, end_ms], |row| {
+            let session_id: String = row.get(0)?;
+            let last_ts: i64 = row.get(1)?;
+            let model: String = row.get(2)?;
+            let input: i64 = row.get(3)?;
+            let output: i64 = row.get(4)?;
+            let cache_read: i64 = row.get(5)?;
+            let total: i64 = row.get(6)?;
+            Ok((session_id, last_ts, model, input, output, cache_read, total))
+        })
+        .ok()
     };
 
     let (session_total, current_model, cache_rate, input_tokens, output_tokens, last_active_ts) =
@@ -511,7 +648,6 @@ pub fn hud_summary_with_metrics_at(
     })
 }
 
-
 // ---------------------------------------------------------------------------
 // 内部实现
 // ---------------------------------------------------------------------------
@@ -565,15 +701,21 @@ fn local_day_start_offset(
     Ok(store.local_day_bounds(&date)?.0)
 }
 
-/// 最近 1 小时的到达脉冲，按时间升序（UI 侧顺序累计）
-fn recent_pulses(store: &Store, now_ms: i64) -> Result<Vec<UsagePulse>, CoreError> {
-    let mut stmt = store.conn().prepare_cached(
+/// 支持按引擎筛选的最近 1 小时到达脉冲
+fn recent_pulses_with_engine(
+    store: &Store,
+    now_ms: i64,
+    engine: Option<&str>,
+) -> Result<Vec<UsagePulse>, CoreError> {
+    let engine_clause = sql_engine_where(engine);
+    let sql = format!(
         "SELECT timestamp_ms, input_tokens, output_tokens,
                 cache_read_tokens, cache_creation_tokens
          FROM usage_records
-         WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
-         ORDER BY timestamp_ms, record_id",
-    )?;
+         WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2 {engine_clause}
+         ORDER BY timestamp_ms, record_id"
+    );
+    let mut stmt = store.conn().prepare_cached(&sql)?;
     let pulses = stmt
         .query_map(params![now_ms - PULSE_WINDOW_MS, now_ms], |row| {
             Ok(UsagePulse {
@@ -595,8 +737,10 @@ fn models_between(
     start_ms: i64,
     end_ms: i64,
     prices: &PriceTable,
+    engine: Option<&str>,
 ) -> Result<(Vec<ModelSlice>, i64, f64, i64), CoreError> {
-    let mut stmt = store.conn().prepare_cached(
+    let engine_clause = sql_engine_where(engine);
+    let sql = format!(
         "SELECT model,
                 SUM(input_tokens),
                 SUM(output_tokens),
@@ -605,11 +749,12 @@ fn models_between(
                 SUM(input_tokens + output_tokens
                     + cache_read_tokens + cache_creation_tokens) AS tokens
          FROM usage_records
-         WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2
+         WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2 {engine_clause}
          GROUP BY model
          HAVING tokens > 0
-         ORDER BY tokens DESC, model ASC",
-    )?;
+         ORDER BY tokens DESC, model ASC"
+    );
+    let mut stmt = store.conn().prepare_cached(&sql)?;
     let mut priced_tokens = 0i64;
     let mut total_cost = 0.0f64;
     let mut unpriced_tokens = 0i64;
@@ -656,8 +801,10 @@ fn profile_costs_between(
     start_ms: i64,
     end_ms: i64,
     prices: &PriceTable,
+    engine: Option<&str>,
 ) -> Result<std::collections::HashMap<Option<i64>, TokenCost>, CoreError> {
-    let mut stmt = store.conn().prepare_cached(
+    let engine_clause = sql_engine_where_alias(engine, "r");
+    let sql = format!(
         "SELECT r.profile_id,
                 r.model,
                 SUM(r.input_tokens),
@@ -667,10 +814,11 @@ fn profile_costs_between(
                 SUM(r.input_tokens + r.output_tokens
                     + r.cache_read_tokens + r.cache_creation_tokens) AS tokens
          FROM usage_records r
-         WHERE r.timestamp_ms >= ?1 AND r.timestamp_ms < ?2
+         WHERE r.timestamp_ms >= ?1 AND r.timestamp_ms < ?2 {engine_clause}
          GROUP BY r.profile_id, r.model
-         HAVING tokens > 0",
-    )?;
+         HAVING tokens > 0"
+    );
+    let mut stmt = store.conn().prepare_cached(&sql)?;
 
     let mut map: std::collections::HashMap<Option<i64>, (f64, i64, i64)> =
         std::collections::HashMap::new();
@@ -683,7 +831,15 @@ fn profile_costs_between(
         let cache_read: i64 = row.get(4)?;
         let cache_creation: i64 = row.get(5)?;
         let tokens: i64 = row.get(6)?;
-        Ok((profile_id, model, input, output, cache_read, cache_creation, tokens))
+        Ok((
+            profile_id,
+            model,
+            input,
+            output,
+            cache_read,
+            cache_creation,
+            tokens,
+        ))
     })?;
 
     for item in rows {
@@ -726,9 +882,11 @@ fn profiles_between(
     start_ms: i64,
     end_ms: i64,
     prices: &PriceTable,
+    engine: Option<&str>,
 ) -> Result<Vec<ProfileCard>, CoreError> {
-    let profile_costs = profile_costs_between(store, start_ms, end_ms, prices)?;
-    let mut stmt = store.conn().prepare_cached(
+    let profile_costs = profile_costs_between(store, start_ms, end_ms, prices, engine)?;
+    let engine_clause = sql_engine_where_alias(engine, "r");
+    let sql = format!(
         "SELECT r.profile_id,
                 p.display_name, p.endpoint,
                 COALESCE(p.quota_total, p.quota_manual_total) AS quota_total,
@@ -745,11 +903,12 @@ fn profiles_between(
                     + r.cache_read_tokens + r.cache_creation_tokens) AS tokens
          FROM usage_records r
          LEFT JOIN profiles p ON p.id = r.profile_id
-         WHERE r.timestamp_ms >= ?1 AND r.timestamp_ms < ?2
+         WHERE r.timestamp_ms >= ?1 AND r.timestamp_ms < ?2 {engine_clause}
          GROUP BY r.profile_id
          HAVING tokens > 0
-         ORDER BY (r.profile_id IS NULL) ASC, tokens DESC, r.profile_id ASC",
-    )?;
+         ORDER BY (r.profile_id IS NULL) ASC, tokens DESC, r.profile_id ASC"
+    );
+    let mut stmt = store.conn().prepare_cached(&sql)?;
     let cards = stmt
         .query_map(params![start_ms, end_ms], |row| {
             let profile_id: Option<i64> = row.get(0)?;
@@ -807,8 +966,10 @@ fn sessions_between(
     start_ms: i64,
     end_ms: i64,
     now_ms: i64,
+    engine: Option<&str>,
 ) -> Result<Vec<SessionRow>, CoreError> {
-    let mut stmt = store.conn().prepare_cached(
+    let engine_clause = sql_engine_where(engine);
+    let sql = format!(
         "SELECT session_id,
                 MAX(timestamp_ms) AS last_active_ms,
                 cwd,
@@ -817,11 +978,12 @@ fn sessions_between(
                 record_id,
                 entrypoint
          FROM usage_records
-         WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2
+         WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2 {engine_clause}
          GROUP BY session_id
          HAVING total > 0
-         ORDER BY last_active_ms DESC, session_id ASC",
-    )?;
+         ORDER BY last_active_ms DESC, session_id ASC"
+    );
+    let mut stmt = store.conn().prepare_cached(&sql)?;
     let sessions = stmt
         .query_map(params![start_ms, end_ms], |row| {
             let session_id: String = row.get(0)?;
@@ -1002,8 +1164,10 @@ pub fn session_flight_recorder(
 
     let mut model_map: std::collections::BTreeMap<String, (TokenTotals, f64, i64, i64)> =
         std::collections::BTreeMap::new();
-    let mut profile_map: std::collections::BTreeMap<Option<i64>, (String, TokenTotals, f64, i64, i64)> =
-        std::collections::BTreeMap::new();
+    let mut profile_map: std::collections::BTreeMap<
+        Option<i64>,
+        (String, TokenTotals, f64, i64, i64),
+    > = std::collections::BTreeMap::new();
 
     let mut pulse_strip = Vec::with_capacity(total_requests);
     let mut all_events = Vec::with_capacity(total_requests);
@@ -1021,7 +1185,8 @@ pub fn session_flight_recorder(
         .unwrap_or_else(|| "claude".to_string());
 
     for (idx, r) in rows.into_iter().enumerate() {
-        let row_total = r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_creation_tokens;
+        let row_total =
+            r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_creation_tokens;
         let is_spike = row_total >= 10_000 && (row_total as f64) >= 2.5 * mean_tokens;
         let spike_reason = if is_spike {
             if r.input_tokens >= row_total / 2 && r.cache_read_tokens < r.input_tokens {
@@ -1073,7 +1238,9 @@ pub fn session_flight_recorder(
 
         let (model_switched, profile_switched) = if !r.is_sidechain {
             let m_sw = prev_main_model.as_ref().is_some_and(|m| m != &r.model);
-            let p_sw = prev_main_profile.as_ref().is_some_and(|p| p != &r.profile_id);
+            let p_sw = prev_main_profile
+                .as_ref()
+                .is_some_and(|p| p != &r.profile_id);
             prev_main_model = Some(r.model.clone());
             prev_main_profile = Some(r.profile_id);
             (m_sw, p_sw)
@@ -1218,7 +1385,11 @@ pub fn session_flight_recorder(
     };
     let cost = TokenCost {
         total: session_cost_sum,
-        coverage: if session_coverage.is_finite() { session_coverage } else { 1.0 },
+        coverage: if session_coverage.is_finite() {
+            session_coverage
+        } else {
+            1.0
+        },
         is_complete: session_unpriced_tokens == 0,
         unpriced_tokens: session_unpriced_tokens,
     };

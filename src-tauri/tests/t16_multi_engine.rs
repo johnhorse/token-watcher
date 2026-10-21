@@ -26,7 +26,12 @@ static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 impl TempDir {
     fn new(name: &str) -> Self {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("tw-test-t16-{}-{}-{}", std::process::id(), name, id));
+        let path = std::env::temp_dir().join(format!(
+            "tw-test-t16-{}-{}-{}",
+            std::process::id(),
+            name,
+            id
+        ));
         let _ = fs::create_dir_all(&path);
         Self { path }
     }
@@ -168,16 +173,34 @@ fn test_multi_engine_parallel_initial_scan() {
     assert_eq!(x_out, 80);
     // 验证 Dashboard sessions 聚合正确标识双引擎来源
     let store = Store::open_readonly(&paths.db_path).unwrap();
-    let dash = token_watcher_lib::core::agg::dashboard(&store, token_watcher_lib::core::agg::Range::All).unwrap();
-    let c_sess = dash.sessions.iter().find(|s| s.session_id == "sess-c1").unwrap();
-    let x_sess = dash.sessions.iter().find(|s| s.session_id == "sess-x1").unwrap();
+    let dash =
+        token_watcher_lib::core::agg::dashboard(&store, token_watcher_lib::core::agg::Range::All)
+            .unwrap();
+    let c_sess = dash
+        .sessions
+        .iter()
+        .find(|s| s.session_id == "sess-c1")
+        .unwrap();
+    let x_sess = dash
+        .sessions
+        .iter()
+        .find(|s| s.session_id == "sess-x1")
+        .unwrap();
     assert_eq!(c_sess.engine, "claude");
     assert_eq!(x_sess.engine, "codex");
 
     // 验证 SessionFlightRecorder 返回准确引擎
-    let x_fr = token_watcher_lib::core::agg::session_flight_recorder(&store, None, "sess-x1", None, 20_000).unwrap().unwrap();
+    let x_fr = token_watcher_lib::core::agg::session_flight_recorder(
+        &store, None, "sess-x1", None, 20_000,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(x_fr.engine, "codex");
-    let c_fr = token_watcher_lib::core::agg::session_flight_recorder(&store, None, "sess-c1", None, 20_000).unwrap().unwrap();
+    let c_fr = token_watcher_lib::core::agg::session_flight_recorder(
+        &store, None, "sess-c1", None, 20_000,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(c_fr.engine, "claude");
 
     // 验证 scan-progress 收尾为 done
@@ -329,4 +352,54 @@ fn test_live_codex_sessions_smoke_replay() {
     };
     eprintln!("[t16] 真实解析出的模型清单: {:?}", distinct_models);
     assert!(!distinct_models.is_empty());
+}
+
+#[test]
+fn test_codex_watcher_dir_linkage() {
+    use notify::Event;
+    use std::sync::mpsc::channel;
+
+    let temp = TempDir::new("codex-dir-watch");
+    let paths = paths_for(temp.path());
+    let (tx, _rx) = channel();
+    let mut engine = DataEngine::new(paths.clone(), MockSink::new(), tx);
+
+    // 准备 Codex 日志目录：2026/10/21
+    let codex_day = paths.codex_sessions_root.join("2026/10/21");
+    fs::create_dir_all(&codex_day).unwrap();
+    let rollout_file = codex_day.join("rollout-2026-10-21-test.jsonl");
+    fs::write(
+        &rollout_file,
+        r#"{"type":"session_meta","payload":{"session_id":"s-1"}}"#,
+    )
+    .unwrap();
+
+    // 1. 模拟 macOS FSEvents 批量写聚合发送目录事件（path 指向 2026/10/21 目录，而非文件）
+    let dir_ev = Event {
+        kind: notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )),
+        paths: vec![codex_day],
+        attrs: Default::default(),
+    };
+    engine.handle(token_watcher_lib::watch::Message::Fs(dir_ev));
+    assert!(
+        engine.pending_files_contains(&rollout_file),
+        "Codex 日期目录变更事件必须成功联动提取目录内的 rollout-*.jsonl 会话文件"
+    );
+
+    // 2. 模拟上一级月份目录变更事件（2026/10）
+    let month_dir = paths.codex_sessions_root.join("2026/10");
+    let month_ev = Event {
+        kind: notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )),
+        paths: vec![month_dir],
+        attrs: Default::default(),
+    };
+    engine.handle(token_watcher_lib::watch::Message::Fs(month_ev));
+    assert!(
+        engine.pending_files_contains(&rollout_file),
+        "Codex 月份层级目录事件也应能递归扫描提取出深层 rollout-*.jsonl 会话文件"
+    );
 }

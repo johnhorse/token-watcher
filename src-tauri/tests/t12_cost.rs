@@ -78,7 +78,10 @@ fn test_bundled_claude_sonnet_pricing() {
 
     // 1M input ($3) + 1M output ($15) + 1M cache_read ($0.30) + 1M cache_creation ($3.75) = $22.05
     let cost = unit.calculate(1_000_000, 1_000_000, 1_000_000, 1_000_000);
-    assert!((cost - 22.05).abs() < 1e-6, "Sonnet 4 项各 1M 花费应为 $22.05，实测 {cost}");
+    assert!(
+        (cost - 22.05).abs() < 1e-6,
+        "Sonnet 4 项各 1M 花费应为 $22.05，实测 {cost}"
+    );
 }
 
 // 2. 前缀剥离与动态别名匹配
@@ -112,7 +115,10 @@ fn test_empty_range_coverage_and_cost() {
 
     assert_eq!(dashboard.totals.total, 0);
     assert_eq!(dashboard.cost.total, 0.0);
-    assert_eq!(dashboard.cost.coverage, 1.0, "空范围 coverage 必须为 1.0 防 NaN");
+    assert_eq!(
+        dashboard.cost.coverage, 1.0,
+        "空范围 coverage 必须为 1.0 防 NaN"
+    );
     assert!(dashboard.cost.is_complete, "空范围 is_complete 必须为 true");
     assert_eq!(dashboard.cost.unpriced_tokens, 0);
 }
@@ -124,9 +130,25 @@ fn test_mixed_models_cost_aggregation() {
     let now = 10_000;
 
     // 1) 已知模型: claude-3-5-sonnet-20241022: 100k input ($0.3), 10k output ($0.15) -> $0.45
-    let r1 = make_record("u1", "claude-3-5-sonnet-20241022", now - 1000, 100_000, 10_000, 0, 0);
+    let r1 = make_record(
+        "u1",
+        "claude-3-5-sonnet-20241022",
+        now - 1000,
+        100_000,
+        10_000,
+        0,
+        0,
+    );
     // 2) 未知模型: my-custom-relay-model: 10k input, 10k output (总计 20k 未定价)
-    let r2 = make_record("u2", "my-custom-relay-model", now - 500, 10_000, 10_000, 0, 0);
+    let r2 = make_record(
+        "u2",
+        "my-custom-relay-model",
+        now - 500,
+        10_000,
+        10_000,
+        0,
+        0,
+    );
     store.upsert_records(&[r1, r2]).unwrap();
 
     let dashboard = agg::dashboard_at(&store, Range::Today, now).unwrap();
@@ -136,15 +158,26 @@ fn test_mixed_models_cost_aggregation() {
     assert!((dashboard.cost.total - 0.45).abs() < 1e-6);
     // 覆盖率: 110_000 / 130_000 ≈ 0.846
     assert!((dashboard.cost.coverage - (110_000.0 / 130_000.0)).abs() < 1e-4);
-    assert!(!dashboard.cost.is_complete, "含未知模型时 is_complete 必须为 false");
+    assert!(
+        !dashboard.cost.is_complete,
+        "含未知模型时 is_complete 必须为 false"
+    );
     assert_eq!(dashboard.cost.unpriced_tokens, 20_000);
 
     // 模型切片
-    let sonnet_slice = dashboard.models.iter().find(|m| m.model.contains("sonnet")).unwrap();
+    let sonnet_slice = dashboard
+        .models
+        .iter()
+        .find(|m| m.model.contains("sonnet"))
+        .unwrap();
     assert!(sonnet_slice.cost.is_some());
     assert!((sonnet_slice.cost.unwrap() - 0.45).abs() < 1e-6);
 
-    let custom_slice = dashboard.models.iter().find(|m| m.model == "my-custom-relay-model").unwrap();
+    let custom_slice = dashboard
+        .models
+        .iter()
+        .find(|m| m.model == "my-custom-relay-model")
+        .unwrap();
     assert!(custom_slice.cost.is_none(), "未知模型 cost 应为 None");
 }
 
@@ -167,7 +200,11 @@ fn test_free_model_pricing() {
     assert_eq!(dashboard.cost.unpriced_tokens, 0);
 
     let slice = &dashboard.models[0];
-    assert_eq!(slice.cost, Some(0.0), "免费模型 cost 为 Some(0.0) 而非 None");
+    assert_eq!(
+        slice.cost,
+        Some(0.0),
+        "免费模型 cost 为 Some(0.0) 而非 None"
+    );
 }
 
 // 6. 多档案分摊与 Profile 级 cost 聚合
@@ -177,28 +214,52 @@ fn test_profile_level_cost_aggregation() {
     let now = 20_000;
 
     // 建立两个 Profile
-    let p1 = store.ensure_profile("Anthropic 官方", Some("https://api.anthropic.com")).unwrap();
-    let p2 = store.ensure_profile("DeepSeek", Some("https://api.deepseek.com")).unwrap();
+    let p1 = store
+        .ensure_profile("Anthropic 官方", Some("https://api.anthropic.com"))
+        .unwrap();
+    let p2 = store
+        .ensure_profile("DeepSeek", Some("https://api.deepseek.com"))
+        .unwrap();
 
     // 档案 1: 使用 sonnet (100k input = $0.3)
-    let r1 = make_record("u1", "claude-3-5-sonnet-20241022", now - 2000, 100_000, 0, 0, 0);
+    let r1 = make_record(
+        "u1",
+        "claude-3-5-sonnet-20241022",
+        now - 2000,
+        100_000,
+        0,
+        0,
+        0,
+    );
     // 档案 2: 使用 deepseek-chat (1M input = $0.14)
     let r2 = make_record("u2", "deepseek-chat", now - 1000, 1_000_000, 0, 0, 0);
     store.upsert_records(&[r1, r2]).unwrap();
 
     // 手动指定归因区间
-    store.reassign_profile_range(Some(p1), now - 2000, now - 1999).unwrap();
-    store.reassign_profile_range(Some(p2), now - 1000, now - 999).unwrap();
+    store
+        .reassign_profile_range(Some(p1), now - 2000, now - 1999)
+        .unwrap();
+    store
+        .reassign_profile_range(Some(p2), now - 1000, now - 999)
+        .unwrap();
 
     let dashboard = agg::dashboard_at(&store, Range::Today, now).unwrap();
     assert_eq!(dashboard.profiles.len(), 2);
 
-    let card_p1 = dashboard.profiles.iter().find(|p| p.profile_id == Some(p1)).unwrap();
+    let card_p1 = dashboard
+        .profiles
+        .iter()
+        .find(|p| p.profile_id == Some(p1))
+        .unwrap();
     assert!(card_p1.cost.is_some());
     assert!((card_p1.cost.unwrap().total - 0.3).abs() < 1e-6);
     assert!(card_p1.cost.unwrap().is_complete);
 
-    let card_p2 = dashboard.profiles.iter().find(|p| p.profile_id == Some(p2)).unwrap();
+    let card_p2 = dashboard
+        .profiles
+        .iter()
+        .find(|p| p.profile_id == Some(p2))
+        .unwrap();
     assert!(card_p2.cost.is_some());
     assert!((card_p2.cost.unwrap().total - 0.14).abs() < 1e-6);
     assert!(card_p2.cost.unwrap().is_complete);

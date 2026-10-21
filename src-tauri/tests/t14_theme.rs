@@ -41,8 +41,14 @@ fn theme_mode_as_str_and_from_str_loose() {
 
     assert_eq!(ThemeMode::from_str_loose("slate"), ThemeMode::Slate);
     assert_eq!(ThemeMode::from_str_loose("mint"), ThemeMode::Mint);
-    assert_eq!(ThemeMode::from_str_loose("meter-face"), ThemeMode::MeterFace);
-    assert_eq!(ThemeMode::from_str_loose("unknown-val"), ThemeMode::MeterFace);
+    assert_eq!(
+        ThemeMode::from_str_loose("meter-face"),
+        ThemeMode::MeterFace
+    );
+    assert_eq!(
+        ThemeMode::from_str_loose("unknown-val"),
+        ThemeMode::MeterFace
+    );
     assert_eq!(ThemeMode::from_str_loose(""), ThemeMode::MeterFace);
 }
 

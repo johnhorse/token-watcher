@@ -126,8 +126,14 @@ export interface SessionFlightRecorder {
   events_truncated: boolean;
 }
 
+export interface EngineSlice {
+  engine: string;
+  tokens: number;
+}
+
 export interface Dashboard {
   range: Range;
+  engine?: string | null;
   totals: TokenTotals;
   cost: TokenCost;
   /** 固定最近 1 小时（与 range 无关） */
@@ -135,6 +141,7 @@ export interface Dashboard {
   models: ModelRow[];
   profiles: ProfileCard[];
   sessions: SessionRow[];
+  available_engines?: EngineSlice[];
 }
 
 export interface ScanStatus {
@@ -178,7 +185,7 @@ export interface HudSummary {
 export type Unsubscribe = () => void;
 
 export interface UiAdapter {
-  getDashboard(range: Range): Promise<Dashboard>;
+  getDashboard(range: Range, engine?: string | null): Promise<Dashboard>;
   getScanStatus(): Promise<ScanStatus>;
   updateProfileDisplay(profileId: number, displayName: string): Promise<void>;
   updateProfileQuota(

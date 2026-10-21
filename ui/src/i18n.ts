@@ -122,6 +122,9 @@ const zh = {
   "flight.spike": "突刺: {r}",
   "flight.notFound": "未找到会话数据",
   "flight.truncated": "已显示最新 {n} 条请求",
+  "engine.all": "全部",
+  "sessions.search": "搜索会话...",
+  "sessions.noMatches": "未找到匹配会话",
 } as const;
 
 export type MessageKey = keyof typeof zh;
@@ -246,10 +249,12 @@ const en: Record<MessageKey, string> = {
   "flight.spike": "Spike: {r}",
   "flight.notFound": "Session data not found",
   "flight.truncated": "Showing latest {n} requests",
+  "engine.all": "All",
+  "sessions.search": "Search sessions...",
+  "sessions.noMatches": "No matching sessions",
 };
 
 const dict: Record<Lang, Record<MessageKey, string>> = { zh, en };
-
 function detectLang(): Lang {
   const override = new URLSearchParams(window.location.search).get("lang");
   if (override === "zh" || override === "en") return override;

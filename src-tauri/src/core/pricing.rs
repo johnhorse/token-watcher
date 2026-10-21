@@ -150,11 +150,7 @@ impl PriceTable {
                 .get("cache_creation_input_token_cost")
                 .and_then(|v| v.as_f64())
                 .filter(|c| c.is_finite() && *c >= 0.0)
-                .unwrap_or(if is_anthropic {
-                    input_cost * 1.25
-                } else {
-                    0.0
-                });
+                .unwrap_or(if is_anthropic { input_cost * 1.25 } else { 0.0 });
 
             let unit = UnitPrice {
                 input_cost_per_token: input_cost,
@@ -315,7 +311,9 @@ fn extract_family_and_date(s: &str) -> Option<(String, String)> {
     // 匹配末尾 8 位纯数字日期 202xxxxx
     if let Some(idx) = base.rfind('-') {
         let suffix = &base[idx + 1..];
-        if suffix.len() == 8 && suffix.starts_with("202") && suffix.chars().all(|c| c.is_ascii_digit())
+        if suffix.len() == 8
+            && suffix.starts_with("202")
+            && suffix.chars().all(|c| c.is_ascii_digit())
         {
             let family = base[..idx].to_string();
             let date = suffix.to_string();
@@ -452,7 +450,9 @@ impl PriceManager {
                         }
                     }
                     Err(e) => {
-                        eprintln!("[token-watcher] 远程价格表解析未通过健康校验: {e}（保留现有缓存）");
+                        eprintln!(
+                            "[token-watcher] 远程价格表解析未通过健康校验: {e}（保留现有缓存）"
+                        );
                     }
                 },
                 Err(e) => {

@@ -388,13 +388,7 @@ pub fn setup(
         }
     });
 
-    spawn_refresher(
-        tray,
-        db_path.to_path_buf(),
-        initial_metrics,
-        lang,
-        rx,
-    );
+    spawn_refresher(tray, db_path.to_path_buf(), initial_metrics, lang, rx);
     Ok(tx)
 }
 

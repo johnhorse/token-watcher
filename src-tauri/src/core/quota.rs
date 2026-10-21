@@ -43,11 +43,13 @@ impl OriginInfo {
         let parsed = reqwest::Url::parse(trimmed).ok()?;
         let scheme = parsed.scheme().to_ascii_lowercase();
         let host = parsed.host_str()?.to_ascii_lowercase();
-        let port = parsed.port_or_known_default().unwrap_or(match scheme.as_str() {
-            "https" => 443,
-            "http" => 80,
-            _ => 80,
-        });
+        let port = parsed
+            .port_or_known_default()
+            .unwrap_or(match scheme.as_str() {
+                "https" => 443,
+                "http" => 80,
+                _ => 80,
+            });
         Some(Self { scheme, host, port })
     }
 
@@ -106,7 +108,9 @@ pub fn check_error_envelope(json: &serde_json::Value) -> Result<(), String> {
 
 /// 解析 subscription 响应，获取 hard_limit_usd 等上限及过期日期
 /// 优先级: hard_limit_usd > soft_limit_usd > system_hard_limit_usd
-pub fn parse_subscription_response(json: &serde_json::Value) -> Result<(Option<f64>, Option<String>), String> {
+pub fn parse_subscription_response(
+    json: &serde_json::Value,
+) -> Result<(Option<f64>, Option<String>), String> {
     check_error_envelope(json)?;
 
     let hard = json.get("hard_limit_usd").and_then(|v| v.as_f64());
@@ -136,7 +140,10 @@ pub fn parse_subscription_response(json: &serde_json::Value) -> Result<(Option<f
 }
 
 /// 解析 usage 响应获取 total_usage
-pub fn parse_usage_response(json: &serde_json::Value, total_limit: Option<f64>) -> Result<Option<f64>, String> {
+pub fn parse_usage_response(
+    json: &serde_json::Value,
+    total_limit: Option<f64>,
+) -> Result<Option<f64>, String> {
     check_error_envelope(json)?;
 
     let raw_usage = json.get("total_usage").and_then(|v| v.as_f64());
@@ -276,7 +283,10 @@ impl QuotaClient {
         let mut last_err = String::new();
 
         for (sub_url, usage_url) in candidates {
-            match self.try_subscription_and_usage(&sub_url, &usage_url, api_key).await {
+            match self
+                .try_subscription_and_usage(&sub_url, &usage_url, api_key)
+                .await
+            {
                 Ok(q) => return Ok(q),
                 Err(e) => {
                     last_err = e;
@@ -453,11 +463,8 @@ impl QuotaSyncer {
             .unwrap_or(endpoint.as_str());
 
         // 确定用于鉴权的 Key（混合凭据与 SSRF 检查）
-        let (api_key, is_inactive) = self.resolve_credential(
-            &endpoint,
-            target_url,
-            quota_api_key.as_deref(),
-        );
+        let (api_key, is_inactive) =
+            self.resolve_credential(&endpoint, target_url, quota_api_key.as_deref());
 
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -489,15 +496,7 @@ impl QuotaSyncer {
 
         let Some(key) = api_key else {
             let err_msg = "缺少查询 Key，跨站点必须配置专属 Key";
-            self.write_sync_result(
-                profile_id,
-                None,
-                None,
-                None,
-                "error",
-                Some(err_msg),
-                now_ms,
-            )?;
+            self.write_sync_result(profile_id, None, None, None, "error", Some(err_msg), now_ms)?;
             return Err(err_msg.to_string());
         };
 
@@ -525,15 +524,7 @@ impl QuotaSyncer {
                 })
             }
             Err(e) => {
-                self.write_sync_result(
-                    profile_id,
-                    None,
-                    None,
-                    None,
-                    "error",
-                    Some(&e),
-                    now_ms,
-                )?;
+                self.write_sync_result(profile_id, None, None, None, "error", Some(&e), now_ms)?;
                 Err(e)
             }
         }

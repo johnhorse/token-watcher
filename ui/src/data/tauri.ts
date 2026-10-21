@@ -32,8 +32,8 @@ function subscribe<T>(event: string, cb: (payload: T) => void): Unsubscribe {
 
 export function createTauriAdapter(): UiAdapter {
   return {
-    getDashboard: (range: Range) =>
-      invoke<Dashboard>("get_dashboard", { range }),
+    getDashboard: (range: Range, engine?: string | null) =>
+      invoke<Dashboard>("get_dashboard", { range, engine: engine || null }),
 
     getScanStatus: () => invoke<ScanStatus>("get_scan_status"),
 

@@ -80,8 +80,9 @@ fn test_nonexistent_session() {
     let store = Store::open(&db_path).unwrap();
     let prices = PriceTable::bundled();
 
-    let res = agg::session_flight_recorder(&store, Some(&prices), "non-existent-sess", None, 100_000)
-        .unwrap();
+    let res =
+        agg::session_flight_recorder(&store, Some(&prices), "non-existent-sess", None, 100_000)
+            .unwrap();
     assert!(res.is_none());
 }
 
@@ -92,7 +93,17 @@ fn test_single_record_session() {
     let mut store = Store::open(&db_path).unwrap();
     let prices = PriceTable::bundled();
 
-    let rec = make_record("sess-single", "msg-1", "claude-3-5-haiku-20241022", 10_000, 100, 200, 500, 0, false);
+    let rec = make_record(
+        "sess-single",
+        "msg-1",
+        "claude-3-5-haiku-20241022",
+        10_000,
+        100,
+        200,
+        500,
+        0,
+        false,
+    );
     store.upsert_records(&[rec]).unwrap();
 
     let fr = agg::session_flight_recorder(&store, Some(&prices), "sess-single", None, 10_000)
@@ -129,9 +140,39 @@ fn test_multi_turn_aggregation_and_models() {
     let prices = PriceTable::bundled();
 
     let recs = vec![
-        make_record("sess-multi", "msg-1", "claude-3-5-haiku-20241022", 10_000, 1000, 200, 0, 0, false),
-        make_record("sess-multi", "msg-2", "claude-3-5-haiku-20241022", 20_000, 500, 100, 1500, 0, false),
-        make_record("sess-multi", "msg-3", "claude-3-7-sonnet-20250219", 40_000, 2000, 800, 4000, 1000, false),
+        make_record(
+            "sess-multi",
+            "msg-1",
+            "claude-3-5-haiku-20241022",
+            10_000,
+            1000,
+            200,
+            0,
+            0,
+            false,
+        ),
+        make_record(
+            "sess-multi",
+            "msg-2",
+            "claude-3-5-haiku-20241022",
+            20_000,
+            500,
+            100,
+            1500,
+            0,
+            false,
+        ),
+        make_record(
+            "sess-multi",
+            "msg-3",
+            "claude-3-7-sonnet-20250219",
+            40_000,
+            2000,
+            800,
+            4000,
+            1000,
+            false,
+        ),
     ];
     store.upsert_records(&recs).unwrap();
 
@@ -164,10 +205,50 @@ fn test_sidechain_isolation_and_model_switch() {
 
     // 场景：主链用 Sonnet，中间插了一条子链用 Haiku 执行小任务，随后主链继续用 Sonnet
     let recs = vec![
-        make_record("sess-chain", "msg-1", "claude-3-7-sonnet-20250219", 10_000, 1000, 100, 0, 0, false),
-        make_record("sess-chain", "msg-2", "claude-3-5-haiku-20241022", 15_000, 200, 50, 0, 0, true), // sidechain!
-        make_record("sess-chain", "msg-3", "claude-3-7-sonnet-20250219", 20_000, 1000, 100, 0, 0, false),
-        make_record("sess-chain", "msg-4", "claude-3-opus-20240229", 30_000, 1000, 100, 0, 0, false),
+        make_record(
+            "sess-chain",
+            "msg-1",
+            "claude-3-7-sonnet-20250219",
+            10_000,
+            1000,
+            100,
+            0,
+            0,
+            false,
+        ),
+        make_record(
+            "sess-chain",
+            "msg-2",
+            "claude-3-5-haiku-20241022",
+            15_000,
+            200,
+            50,
+            0,
+            0,
+            true,
+        ), // sidechain!
+        make_record(
+            "sess-chain",
+            "msg-3",
+            "claude-3-7-sonnet-20250219",
+            20_000,
+            1000,
+            100,
+            0,
+            0,
+            false,
+        ),
+        make_record(
+            "sess-chain",
+            "msg-4",
+            "claude-3-opus-20240229",
+            30_000,
+            1000,
+            100,
+            0,
+            0,
+            false,
+        ),
     ];
     store.upsert_records(&recs).unwrap();
 
@@ -187,11 +268,17 @@ fn test_sidechain_isolation_and_model_switch() {
 
     // msg-3: 主链继续用 Sonnet，与前一条主链 msg-1 相同，严禁因夹杂的子链而误报切换！
     assert!(!fr.events[2].is_sidechain);
-    assert!(!fr.events[2].model_switched, "主链前后均为 Sonnet，中间子链不应触发误报切换");
+    assert!(
+        !fr.events[2].model_switched,
+        "主链前后均为 Sonnet，中间子链不应触发误报切换"
+    );
 
     // msg-4: 主链切换为 Opus，必须正确识别为切换
     assert!(!fr.events[3].is_sidechain);
-    assert!(fr.events[3].model_switched, "主链由 Sonnet 切换至 Opus，必须正确标记");
+    assert!(
+        fr.events[3].model_switched,
+        "主链由 Sonnet 切换至 Opus，必须正确标记"
+    );
 }
 
 #[test]
@@ -256,12 +343,18 @@ fn test_spike_detection_and_reasons() {
 
     // 突刺 1 (index 10)
     assert!(fr.events[10].is_spike);
-    assert_eq!(fr.events[10].spike_reason.as_deref(), Some("未缓存输入主导"));
+    assert_eq!(
+        fr.events[10].spike_reason.as_deref(),
+        Some("未缓存输入主导")
+    );
     assert!(fr.pulse_strip[10].is_spike);
 
     // 突刺 2 (index 11)
     assert!(fr.events[11].is_spike);
-    assert_eq!(fr.events[11].spike_reason.as_deref(), Some("缓存写入/上下文填充"));
+    assert_eq!(
+        fr.events[11].spike_reason.as_deref(),
+        Some("缓存写入/上下文填充")
+    );
     assert!(fr.pulse_strip[11].is_spike);
 }
 
@@ -311,7 +404,17 @@ fn test_unpriced_model_handling() {
     let mut store = Store::open(&db_path).unwrap();
     let prices = PriceTable::bundled();
 
-    let rec = make_record("sess-unpriced", "msg-1", "custom-private-model", 10_000, 1000, 500, 0, 0, false);
+    let rec = make_record(
+        "sess-unpriced",
+        "msg-1",
+        "custom-private-model",
+        10_000,
+        1000,
+        500,
+        0,
+        0,
+        false,
+    );
     store.upsert_records(&[rec]).unwrap();
 
     let fr = agg::session_flight_recorder(&store, Some(&prices), "sess-unpriced", None, 15_000)

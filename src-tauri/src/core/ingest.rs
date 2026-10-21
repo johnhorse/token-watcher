@@ -66,12 +66,17 @@ pub enum FileEngineKind {
 
 /// 依据文件名及内容抽样自动判定文件所属引擎
 pub fn detect_file_kind(path: &Path, sample_bytes: &[u8]) -> FileEngineKind {
-    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
     let path_str = path.to_string_lossy();
     if filename == "opencode.db" || (filename.ends_with(".db") && path_str.contains("opencode")) {
         return FileEngineKind::OpenCode;
     }
-    if filename.ends_with(".json") && (path_str.contains(".continue") || path_str.contains("continue")) {
+    if filename.ends_with(".json")
+        && (path_str.contains(".continue") || path_str.contains("continue"))
+    {
         return FileEngineKind::Continue;
     }
     if filename == "ui_messages.json" {
@@ -102,7 +107,9 @@ pub fn detect_file_kind(path: &Path, sample_bytes: &[u8]) -> FileEngineKind {
         return FileEngineKind::CodexCli;
     }
     if sample_bytes.windows(14).any(|w| w == b"\"session_meta\"")
-        || sample_bytes.windows(20).any(|w| w == b"\"token_usage_record\"")
+        || sample_bytes
+            .windows(20)
+            .any(|w| w == b"\"token_usage_record\"")
     {
         return FileEngineKind::CodexCli;
     }
@@ -110,7 +117,10 @@ pub fn detect_file_kind(path: &Path, sample_bytes: &[u8]) -> FileEngineKind {
 }
 
 /// 极速状态重放：扫描从 0 到 up_to_offset 字节的元数据行，重建 CodexFileState
-pub fn replay_codex_state(file_path: &Path, up_to_offset: u64) -> Result<CodexFileState, CoreError> {
+pub fn replay_codex_state(
+    file_path: &Path,
+    up_to_offset: u64,
+) -> Result<CodexFileState, CoreError> {
     let mut state = CodexFileState::default();
     if up_to_offset == 0 {
         return Ok(state);
@@ -142,6 +152,44 @@ pub fn checkpoint_key(path: &Path) -> String {
         .to_string_lossy()
         .into_owned()
 }
+/// 从 omp 会话文件中提取项目的实际工作目录 cwd
+pub fn extract_omp_cwd(path: &Path) -> Option<String> {
+    if let Ok(file) = fs::File::open(path) {
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(file);
+        let mut line = String::new();
+        // 扫描前 10 行，提取 {"type":"session", ... "cwd":"..."}
+        for _ in 0..10 {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                if v.get("type").and_then(|s| s.as_str()) == Some("session") {
+                    if let Some(cwd) = v.get("cwd").and_then(|s| s.as_str()) {
+                        if !cwd.is_empty() {
+                            return Some(cwd.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 降级兜底：从父目录名解码，如 "--Volumes-Data-projects-token-watcher--"
+    if let Some(dir_name) = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+    {
+        if dir_name.starts_with("--") && dir_name.ends_with("--") {
+            let trimmed = dir_name.trim_matches('-');
+            if !trimmed.is_empty() {
+                return Some(format!("/{}", trimmed.replace('-', "/")));
+            }
+        }
+    }
+    None
+}
 
 /// 增量读取单个文件并落库
 pub fn ingest_file(store: &mut Store, path: &Path) -> Result<FileIngestStats, CoreError> {
@@ -169,7 +217,10 @@ pub fn ingest_file_with_records(
     let key = checkpoint_key(path);
     let engine_kind = detect_file_kind(path, &[]);
     if engine_kind == FileEngineKind::Cline || engine_kind == FileEngineKind::RooCode {
-        let previous_count = store.get_checkpoint(&key)?.map(|c| c.byte_offset).unwrap_or(0);
+        let previous_count = store
+            .get_checkpoint(&key)?
+            .map(|c| c.byte_offset)
+            .unwrap_or(0);
         let is_same = store
             .get_checkpoint(&key)?
             .map(|c| c.mtime_ms == mtime_ms && c.size == size)
@@ -181,7 +232,10 @@ pub fn ingest_file_with_records(
             Ok(b) => b,
             Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
         };
-        let history_path = path.parent().unwrap_or(path).join("api_conversation_history.json");
+        let history_path = path
+            .parent()
+            .unwrap_or(path)
+            .join("api_conversation_history.json");
         let history_str = fs::read_to_string(&history_path).unwrap_or_default();
         let model = extract_cline_model(&history_str);
         let task_id = path
@@ -221,7 +275,10 @@ pub fn ingest_file_with_records(
     }
 
     if engine_kind == FileEngineKind::OpenCode {
-        let previous_ts = store.get_checkpoint(&key)?.map(|c| c.byte_offset).unwrap_or(0);
+        let previous_ts = store
+            .get_checkpoint(&key)?
+            .map(|c| c.byte_offset)
+            .unwrap_or(0);
         let conn = match rusqlite::Connection::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
@@ -250,7 +307,8 @@ pub fn ingest_file_with_records(
             if time_created > max_ts {
                 max_ts = time_created;
             }
-            if let Some(record) = parse_opencode_message(&id, &session_id, time_created, &data_json) {
+            if let Some(record) = parse_opencode_message(&id, &session_id, time_created, &data_json)
+            {
                 records.push(record);
             }
         }
@@ -287,7 +345,10 @@ pub fn ingest_file_with_records(
             Ok(b) => b,
             Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
         };
-        let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("continue-session");
+        let file_stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("continue-session");
         let records = match parse_continue_session(file_stem, &bytes) {
             Ok(r) => r,
             Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
@@ -341,18 +402,26 @@ pub fn ingest_file_with_records(
         CodexFileState::default()
     };
     let mut aider_tracker = AiderSessionTracker::default();
+    let omp_cwd = if engine_kind == FileEngineKind::Omp {
+        extract_omp_cwd(path)
+    } else {
+        None
+    };
     let mut records = Vec::new();
     let mut new_offset = offset;
     let mut line_start = 0usize;
     for i in 0..buf.len() {
         if buf[i] == b'\n' {
             let line = &buf[line_start..i];
-            let omp_session_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("omp-session");
+            let omp_session_id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("omp-session");
             let parsed = match engine_kind {
                 FileEngineKind::ClaudeCode => parse_line(line),
                 FileEngineKind::CodexCli => parse_codex_line(line, &mut codex_state),
                 FileEngineKind::Aider => parse_aider_line(line, &mut aider_tracker),
-                FileEngineKind::Omp => parse_omp_line(line, omp_session_id),
+                FileEngineKind::Omp => parse_omp_line(line, omp_session_id, omp_cwd.as_deref()),
                 FileEngineKind::Cline
                 | FileEngineKind::RooCode
                 | FileEngineKind::OpenCode
@@ -372,12 +441,15 @@ pub fn ingest_file_with_records(
     // 解析失败 → 写入进行中的不完整尾行，不计数、不推进，下次重读拼接。
     let tail = &buf[line_start..];
     if !tail.is_empty() && serde_json::from_slice::<serde_json::Value>(tail).is_ok() {
-        let omp_session_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("omp-session");
+        let omp_session_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("omp-session");
         let parsed = match engine_kind {
             FileEngineKind::ClaudeCode => parse_line(tail),
             FileEngineKind::CodexCli => parse_codex_line(tail, &mut codex_state),
             FileEngineKind::Aider => parse_aider_line(tail, &mut aider_tracker),
-            FileEngineKind::Omp => parse_omp_line(tail, omp_session_id),
+            FileEngineKind::Omp => parse_omp_line(tail, omp_session_id, omp_cwd.as_deref()),
             FileEngineKind::Cline
             | FileEngineKind::RooCode
             | FileEngineKind::OpenCode
@@ -483,9 +555,11 @@ pub fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>, dirs_failed: &mu
             collect_source_files(&path, out, dirs_failed);
         } else if metadata.is_file() {
             let is_jsonl = path.extension().and_then(|e| e.to_str()) == Some("jsonl");
-            let is_ui_messages = path.file_name().and_then(|n| n.to_str()) == Some("ui_messages.json");
+            let is_ui_messages =
+                path.file_name().and_then(|n| n.to_str()) == Some("ui_messages.json");
             let is_continue = path.extension().and_then(|e| e.to_str()) == Some("json")
-                && (path.to_string_lossy().contains(".continue") || path.to_string_lossy().contains("continue"));
+                && (path.to_string_lossy().contains(".continue")
+                    || path.to_string_lossy().contains("continue"));
             let is_opencode = path.file_name().and_then(|n| n.to_str()) == Some("opencode.db");
             if is_jsonl || is_ui_messages || is_continue || is_opencode {
                 out.push(path);
@@ -531,7 +605,8 @@ mod tests {
             writeln!(
                 f,
                 r#"{{"type":"turn_context","payload":{{"turn_id":"t-1","model":"gpt-6.1-sol"}}}}"#
-            ).unwrap();
+            )
+            .unwrap();
             writeln!(
                 f,
                 r#"{{"timestamp":"2026-10-20T10:00:00.000Z","type":"token_usage_record","payload":{{"session_id":"s-1","turn_id":"t-1","response_id":"resp-1","usage":{{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}}}}"#
@@ -548,7 +623,10 @@ mod tests {
 
         // 模拟追加第 2 轮：更换模型为 gemini-4-argon，并追加 usage(B)
         {
-            let mut f = fs::OpenOptions::new().append(true).open(&file_path).unwrap();
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(&file_path)
+                .unwrap();
             writeln!(
                 f,
                 r#"{{"type":"turn_context","payload":{{"turn_id":"t-2","model":"gemini-4-argon"}}}}"#
@@ -568,7 +646,10 @@ mod tests {
 
         // 模拟更细粒度切分：紧随其后追加第三条 usage(C) 在同一 turn_context 之后（断点位于 turn_context 之后）
         {
-            let mut f = fs::OpenOptions::new().append(true).open(&file_path).unwrap();
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(&file_path)
+                .unwrap();
             writeln!(
                 f,
                 r#"{{"timestamp":"2026-10-20T10:06:00.000Z","type":"token_usage_record","payload":{{"session_id":"s-1","turn_id":"t-2","response_id":"resp-3","usage":{{"input_tokens":3000,"output_tokens":300,"total_tokens":3300}}}}}}"#

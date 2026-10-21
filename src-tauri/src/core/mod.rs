@@ -7,8 +7,8 @@ pub mod agg;
 pub mod attr;
 pub mod ingest;
 pub mod parse;
-pub mod store;
 pub mod pricing;
+pub mod store;
 
 pub mod quota;
 use std::fmt;

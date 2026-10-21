@@ -12,9 +12,9 @@
 //! - 模型维度取 `message.model`（不是 `requestedModel`）；
 //! - 未知字段一律忽略，schema 漂移不得 panic。
 
+use super::CoreError;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use super::CoreError;
 
 /// 一条 assistant 用量记录（已做字段映射与校验）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -459,7 +459,10 @@ pub fn parse_codex_line(line: &[u8], state: &mut CodexFileState) -> ParsedLine {
                     .and_then(Value::as_str)
                     .unwrap_or("noturn");
                 let ordinal = obj.get("ordinal").and_then(Value::as_i64).unwrap_or(0);
-                format!("codex:{}:{}:{}:{}", session_id, turn_id, timestamp_ms, ordinal)
+                format!(
+                    "codex:{}:{}:{}:{}",
+                    session_id, turn_id, timestamp_ms, ordinal
+                )
             };
 
             let raw_input = token_value(usage.get("input_tokens"));
@@ -571,7 +574,12 @@ pub fn extract_cline_model(history_content: &str) -> String {
         if let Some(model) = extract_tag_content(block, "model") {
             last_model = Some(model);
         }
-        search_from = end + if end < history_content.len() { ENV_END.len() } else { 0 };
+        search_from = end
+            + if end < history_content.len() {
+                ENV_END.len()
+            } else {
+                0
+            };
     }
     last_model
         .or_else(|| extract_tag_content(history_content, "model"))
@@ -773,7 +781,7 @@ pub fn parse_aider_line(line: &[u8], tracker: &mut AiderSessionTracker) -> Parse
 }
 
 /// 解析 omp 的项目 JSONL 会话单行
-pub fn parse_omp_line(line: &[u8], session_id: &str) -> ParsedLine {
+pub fn parse_omp_line(line: &[u8], session_id: &str, cwd: Option<&str>) -> ParsedLine {
     let line = trim_bytes(line);
     if line.is_empty() {
         return ParsedLine::Ignored;
@@ -812,10 +820,7 @@ pub fn parse_omp_line(line: &[u8], session_id: &str) -> ParsedLine {
 
     let timestamp_ms = parse_ts_value(obj.get("timestamp")).unwrap_or(0);
 
-    let msg_id = obj
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let msg_id = obj.get("id").and_then(Value::as_str).unwrap_or_default();
     let id_part = if msg_id.is_empty() {
         hash_prefix_8(line)
     } else {
@@ -841,7 +846,7 @@ pub fn parse_omp_line(line: &[u8], session_id: &str) -> ParsedLine {
         model,
         entrypoint: "omp".to_string(),
         is_sidechain: false,
-        cwd: None,
+        cwd: cwd.map(str::to_string),
         cc_version: None,
     })
 }
@@ -958,10 +963,13 @@ pub fn parse_continue_session(
         }
 
         if !found {
-            let usage = item.get("usage").or_else(|| msg.and_then(|m| m.get("usage")));
+            let usage = item
+                .get("usage")
+                .or_else(|| msg.and_then(|m| m.get("usage")));
             if let Some(u) = usage.and_then(Value::as_object) {
                 let p = token_value(u.get("prompt_tokens").or_else(|| u.get("input"))).unwrap_or(0);
-                let c = token_value(u.get("completion_tokens").or_else(|| u.get("output"))).unwrap_or(0);
+                let c = token_value(u.get("completion_tokens").or_else(|| u.get("output")))
+                    .unwrap_or(0);
                 if p > 0 || c > 0 {
                     input_tokens = p;
                     output_tokens = c;
@@ -1289,9 +1297,16 @@ mod tests {
                 "originator": "codex-tui",
                 "cli_version": "0.163.0"
             }
-        }).to_string();
-        assert_eq!(parse_codex_line(meta_line.as_bytes(), &mut state), ParsedLine::Ignored);
-        assert_eq!(state.session_id.as_deref(), Some("01a157bc-cb63-7ee1-a7c7-b75a46e9c9ac"));
+        })
+        .to_string();
+        assert_eq!(
+            parse_codex_line(meta_line.as_bytes(), &mut state),
+            ParsedLine::Ignored
+        );
+        assert_eq!(
+            state.session_id.as_deref(),
+            Some("01a157bc-cb63-7ee1-a7c7-b75a46e9c9ac")
+        );
         assert_eq!(state.originator.as_deref(), Some("codex-tui"));
         assert_eq!(state.cwd.as_deref(), Some("/Volumes/Data/projects/app"));
         assert_eq!(state.cli_version.as_deref(), Some("0.163.0"));
@@ -1304,8 +1319,12 @@ mod tests {
                 "turn_id": "turn-1",
                 "model": "gpt-6.1-sol"
             }
-        }).to_string();
-        assert_eq!(parse_codex_line(turn_line.as_bytes(), &mut state), ParsedLine::Ignored);
+        })
+        .to_string();
+        assert_eq!(
+            parse_codex_line(turn_line.as_bytes(), &mut state),
+            ParsedLine::Ignored
+        );
         assert_eq!(state.current_model.as_deref(), Some("gpt-6.1-sol"));
 
         // OpenAI 包含式：raw input = 27471, cached = 3968, cache_write = 500, out = 210, total = 27681
@@ -1325,12 +1344,16 @@ mod tests {
                     "total_tokens": 27681
                 }
             }
-        }).to_string();
+        })
+        .to_string();
 
         let parsed = parse_codex_line(usage_line.as_bytes(), &mut state);
         match parsed {
             ParsedLine::Record(rec) => {
-                assert_eq!(rec.record_id, "codex:01a157bc-cb63-7ee1-a7c7-b75a46e9c9ac:resp-12345");
+                assert_eq!(
+                    rec.record_id,
+                    "codex:01a157bc-cb63-7ee1-a7c7-b75a46e9c9ac:resp-12345"
+                );
                 assert_eq!(rec.session_id, "01a157bc-cb63-7ee1-a7c7-b75a46e9c9ac");
                 assert_eq!(rec.model, "gpt-6.1-sol");
                 assert_eq!(rec.entrypoint, "codex-tui");
@@ -1358,8 +1381,12 @@ mod tests {
                     "model": "gemini-4-argon"
                 }
             }
-        }).to_string();
-        assert_eq!(parse_codex_line(settings_line.as_bytes(), &mut state), ParsedLine::Ignored);
+        })
+        .to_string();
+        assert_eq!(
+            parse_codex_line(settings_line.as_bytes(), &mut state),
+            ParsedLine::Ignored
+        );
         assert_eq!(state.current_model.as_deref(), Some("gemini-4-argon"));
     }
 
@@ -1381,8 +1408,12 @@ mod tests {
                     "total_tokens": 1100
                 }
             }
-        }).to_string();
-        assert_eq!(parse_codex_line(bad_line.as_bytes(), &mut state), ParsedLine::Bad);
+        })
+        .to_string();
+        assert_eq!(
+            parse_codex_line(bad_line.as_bytes(), &mut state),
+            ParsedLine::Bad
+        );
     }
 
     #[test]
@@ -1401,7 +1432,8 @@ mod tests {
                     "total_tokens": 1050
                 }
             }
-        }).to_string();
+        })
+        .to_string();
         match parse_codex_line(line.as_bytes(), &mut state) {
             ParsedLine::Record(rec) => {
                 assert!(rec.record_id.starts_with("codex:s-1:turn-9:"));
@@ -1414,12 +1446,22 @@ mod tests {
     #[test]
     fn test_codex_ignored_types() {
         let mut state = CodexFileState::new();
-        for typ in ["compacted", "event_msg", "response_item", "world_state", "task_started"] {
+        for typ in [
+            "compacted",
+            "event_msg",
+            "response_item",
+            "world_state",
+            "task_started",
+        ] {
             let line = json!({
                 "type": typ,
                 "payload": {}
-            }).to_string();
-            assert_eq!(parse_codex_line(line.as_bytes(), &mut state), ParsedLine::Ignored);
+            })
+            .to_string();
+            assert_eq!(
+                parse_codex_line(line.as_bytes(), &mut state),
+                ParsedLine::Ignored
+            );
         }
     }
 
@@ -1465,7 +1507,8 @@ mod tests {
                     "apiProtocol": "openai"
                 }).to_string()
             }
-        ]).to_string();
+        ])
+        .to_string();
 
         let history = r#"
         <environment_details>
@@ -1476,7 +1519,8 @@ mod tests {
         let model = extract_cline_model(history);
         assert_eq!(model, "claude-3-7-sonnet-20250219");
 
-        let records = parse_cline_roo_entries("cline", "task-abc", ui_json.as_bytes(), &model).unwrap();
+        let records =
+            parse_cline_roo_entries("cline", "task-abc", ui_json.as_bytes(), &model).unwrap();
         assert_eq!(records.len(), 2, "第3条破损行应被自动跳过");
 
         // 第 1 条 (Anthropic)：tokensIn 已是净输入，不能减
@@ -1485,7 +1529,9 @@ mod tests {
         assert_eq!(records[0].cache_read_tokens, 2000);
         assert_eq!(records[0].cache_creation_tokens, 500);
         assert_eq!(records[0].entrypoint, "cline");
-        assert!(records[0].record_id.starts_with("cline:task-abc:1761516645000:"));
+        assert!(records[0]
+            .record_id
+            .starts_with("cline:task-abc:1761516645000:"));
 
         // 第 2 条 (OpenAI)：6000 - 2000 - 1000 = 3000
         assert_eq!(records[1].input_tokens, 3000);
@@ -1507,7 +1553,8 @@ mod tests {
                 "completion_tokens": 150,
                 "cost": 0.02
             }
-        }).to_string();
+        })
+        .to_string();
 
         // 10 分钟后（同会话）
         let line2 = json!({
@@ -1520,7 +1567,8 @@ mod tests {
                 "completion_tokens": 200,
                 "cost": 0.03
             }
-        }).to_string();
+        })
+        .to_string();
 
         // 40 分钟后（> 30 分钟，触发新会话切片）
         let line3 = json!({
@@ -1533,7 +1581,8 @@ mod tests {
                 "completion_tokens": 80,
                 "cost": 0.01
             }
-        }).to_string();
+        })
+        .to_string();
 
         let r1 = match parse_aider_line(line1.as_bytes(), &mut tracker) {
             ParsedLine::Record(r) => r,

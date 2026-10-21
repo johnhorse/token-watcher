@@ -15,7 +15,9 @@ use token_watcher_lib::app_settings::AppSettings;
 use token_watcher_lib::core::agg::{self, tray_metric_at, TrayMetric};
 use token_watcher_lib::core::parse::UsageRecord;
 use token_watcher_lib::core::store::Store;
-use token_watcher_lib::tray::{compact_number, display, display_multi, full_number, lang_from_locale, Lang};
+use token_watcher_lib::tray::{
+    compact_number, display, display_multi, full_number, lang_from_locale, Lang,
+};
 
 fn temp_dir(tag: &str) -> PathBuf {
     let nanos = SystemTime::now()

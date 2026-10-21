@@ -458,7 +458,10 @@ impl Store {
                     let is_codex = r.record_id.starts_with("codex:");
                     let is_isolated_engine = r.record_id.starts_with("cline:")
                         || r.record_id.starts_with("roo:")
-                        || r.record_id.starts_with("aider:");
+                        || r.record_id.starts_with("aider:")
+                        || r.record_id.starts_with("omp:")
+                        || r.record_id.starts_with("opencode:")
+                        || r.record_id.starts_with("continue:");
                     let (profile_id, attr_source) = if let Some(pid) = proxy_id {
                         (Some(pid), "proxy")
                     } else if is_codex {
@@ -773,9 +776,9 @@ impl Store {
 
     /// 列出所有启用了 API 自动同步的档案 ID
     pub fn list_api_quota_profiles(&self) -> Result<Vec<ProfileId>, CoreError> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id FROM profiles WHERE quota_type = 'api'",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id FROM profiles WHERE quota_type = 'api'")?;
         let rows = stmt
             .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -796,6 +799,34 @@ impl Store {
     /// 统计 `[start_ms, end_ms)` 区间的四项 token 之和
     pub fn totals_between(&self, start_ms: i64, end_ms: i64) -> Result<Totals, CoreError> {
         let mut stmt = self.conn.prepare_cached(TOTALS_SQL)?;
+        let totals = stmt.query_row(params![start_ms, end_ms], |row| {
+            Ok(Totals {
+                input: row.get(0)?,
+                output: row.get(1)?,
+                cache_read: row.get(2)?,
+                cache_creation: row.get(3)?,
+            })
+        })?;
+        Ok(totals)
+    }
+
+    /// 统计指定时间区间与引擎的四项 token 之和
+    pub fn totals_between_with_engine(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+        engine: Option<&str>,
+    ) -> Result<Totals, CoreError> {
+        let engine_clause = crate::core::agg::sql_engine_where(engine);
+        let sql = format!(
+            "SELECT COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(cache_creation_tokens), 0)
+             FROM usage_records
+             WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2 {engine_clause}"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let totals = stmt.query_row(params![start_ms, end_ms], |row| {
             Ok(Totals {
                 input: row.get(0)?,

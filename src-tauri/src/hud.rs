@@ -151,7 +151,10 @@ pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
 }
 
 /// 弹出 HUD 原生右键菜单（配置 6 项指标与锁定开关）
-pub fn show_hud_context_menu(app: &AppHandle, settings_path: &std::path::Path) -> Result<(), String> {
+pub fn show_hud_context_menu(
+    app: &AppHandle,
+    settings_path: &std::path::Path,
+) -> Result<(), String> {
     let Some(window) = app.get_webview_window(HUD_LABEL) else {
         return Err("HUD 窗口不存在".to_string());
     };
@@ -191,14 +194,9 @@ pub fn show_hud_context_menu(app: &AppHandle, settings_path: &std::path::Path) -
     } else {
         "锁定 HUD (鼠标穿透)"
     };
-    let lock_item = tauri::menu::MenuItem::with_id(
-        app,
-        "hud-toggle-lock",
-        lock_text,
-        true,
-        None::<&str>,
-    )
-    .map_err(|e| e.to_string())?;
+    let lock_item =
+        tauri::menu::MenuItem::with_id(app, "hud-toggle-lock", lock_text, true, None::<&str>)
+            .map_err(|e| e.to_string())?;
     items.push(Box::new(lock_item));
 
     let item_refs: Vec<&dyn IsMenuItem<tauri::Wry>> = items.iter().map(|b| b.as_ref()).collect();
