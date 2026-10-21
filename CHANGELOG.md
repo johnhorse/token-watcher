@@ -7,6 +7,29 @@
 
 ---
 
+## [0.4.0] - 2026-10-21
+
+### Added
+- **多数据源生态扩展（Cline / Roo Code / Aider）**：
+  - **Cline 原生直读**：支持 VS Code `globalStorage/saoudrizwan.claude-dev/tasks` 目录下的 `ui_messages.json` 与 `api_conversation_history.json` 自动探测与全景解析；
+  - **Roo Code 原生直读**：支持 `globalStorage/rooveterinaryinc.roo-cline/tasks` 任务目录同构接入；
+  - **Aider 终端日志接入**：增量读取 `~/.aider.analytics.jsonl`（或 `~/.aider/analytics.jsonl`），支持 `message_send` JSONL 事件流解析；
+  - **三类独立数据源扫描器**：重构扫描通道为 `JsonlDir`（Claude/Codex 目录）、`TaskJsonDir`（Cline/Roo 任务目录树）、`SingleJsonlFile`（Aider 单文件），杜绝无界递归，支持单引擎缺失零告警平滑容错；
+  - **稳定内容键与 Rewind 防护**：Cline/Roo 采用基于事件时间戳 `ts` 与内容哈希的稳定主键，彻底消除在 IDE 中回滚（Rewind）或重试时的会话覆盖与重复计数问题；
+  - **(mtime, size) 增量跳过**：整体覆写的 JSON 数组文件在未发生修改时毫秒级跳过，变更时仅向 UI 上报增量新记录，杜绝脉冲洪泛；
+  - **四维 Token 归一化严格分支（D24）**：精准区分 Anthropic 排他口径（净输入不扣减缓存）与 OpenAI 包含式口径（分离扣减 cache_read 与 cache_write），破损行严格拒绝；
+  - **Aider 30 分钟时间切片（D29）**：基于用户 ID 与时间间隙动态切分会话，使终端工具具备真实单次会话的下钻颗粒度；
+  - **Store 层归因严格物理隔离（D28）**：新引擎记录严格默认归属 Unknown 档案，杜绝串染用户既有的 Claude Code 订阅档案；
+  - **Cursor 接入指引**：明确 Cursor 本地无 Token 字段事实，提供无缝的本地代理模式（`127.0.0.1:4040`）接入指引。
+- **UI 极简工控微徽标矩阵升级**：
+  - 会话列表与会话飞行记录仪全面适配 `[Cline]`（冷蓝）、`[Roo]`（焦糖橙）、`[Aider]`（靛紫）、`[Cursor]`（银灰）微徽标；
+  - 维持 9px 等宽字体，严格满足 WCAG AA 4.5:1 对比度标准；
+  - 国际化文案全面升级自适应多引擎提示。
+
+### Changed
+- 项目各组件版本号统一升级至 `0.4.0`；
+- 聚合层 `detect_engine` 与会话飞行记录仪全景支持多引擎切片。
+
 ## [0.3.0] - 2026-10-20
 
 ### Added

@@ -1,8 +1,8 @@
 # token-watcher
 
-跨平台（macOS + Windows）AI token 实时监控桌面小组件。读取 Claude Code（`~/.claude/projects/**/*.jsonl`）
-与 OpenAI Codex CLI（`~/.codex/sessions/**/rollout-*.jsonl`）本地会话数据，菜单栏 + 悬浮窗实时展示 token 消耗；
-多订阅/中转用户可按订阅档案归因统计每个后端各消耗了多少。
+跨平台（macOS + Windows）AI token 实时监控桌面小组件。并行读取 Claude Code、
+OpenAI Codex CLI、Cline（VS Code）、Roo Code（VS Code）与 Aider 本地会话数据，
+菜单栏 + 悬浮窗实时展示 token 消耗；多订阅/中转用户可按订阅档案归因统计每个后端各消耗了多少。
 
 <!-- 截图占位：macOS 菜单栏 + 悬浮窗（v0.1 发布时补） -->
 <!-- 截图占位：Windows 托盘 + 悬浮窗（v0.1 发布时补） -->
@@ -36,6 +36,15 @@
   - 四维互斥 Token 归一化与命名空间去重主键；
   - 会话列表与飞行记录仪行内极简工控徽标（`[Codex]` / `[Claude]`）。
 
+
+## v0.4 新特性
+
+- **多数据源生态扩展（Cline / Roo Code / Aider）**：
+  - 自动发现并解析 VS Code Cline 与 Roo Code 本地任务（`ui_messages.json` + `api_conversation_history.json`）；
+  - 增量读取终端 Aider 日志（`~/.aider.analytics.jsonl`），支持 30 分钟会话动态切分；
+  - 稳定内容主键，彻底防范 IDE 任务回滚（Rewind）与重试导致的会话覆写与双计；
+  - 精准区分 Anthropic 排他口径与 OpenAI 包含式口径四维归一化，严格拒绝破损行；
+  - 全新极简工控微徽标矩阵（`[Claude]` / `[Codex]` / `[Cline]` / `[Roo]` / `[Aider]` / `[Cursor]`）。
 ## 安装
 
 v0.1 尚未发布。发布后从 [GitHub Releases](https://github.com/johnhorse/token-watcher/releases)
