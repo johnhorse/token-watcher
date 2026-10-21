@@ -1,7 +1,8 @@
 # token-watcher
 
 跨平台（macOS + Windows）AI token 实时监控桌面小组件。并行读取 Claude Code、
-OpenAI Codex CLI、Cline（VS Code）、Roo Code（VS Code）与 Aider 本地会话数据，
+OpenAI Codex CLI、Cline（VS Code）、Roo Code（VS Code）、Aider、OpenCode、
+Continue.dev 与 omp 本地会话数据，
 菜单栏 + 悬浮窗实时展示 token 消耗；多订阅/中转用户可按订阅档案归因统计每个后端各消耗了多少。
 
 <!-- 截图占位：macOS 菜单栏 + 悬浮窗（v0.1 发布时补） -->
@@ -45,10 +46,18 @@ OpenAI Codex CLI、Cline（VS Code）、Roo Code（VS Code）与 Aider 本地会
   - 稳定内容主键，彻底防范 IDE 任务回滚（Rewind）与重试导致的会话覆写与双计；
   - 精准区分 Anthropic 排他口径与 OpenAI 包含式口径四维归一化，严格拒绝破损行；
   - 全新极简工控微徽标矩阵（`[Claude]` / `[Codex]` / `[Cline]` / `[Roo]` / `[Aider]` / `[Cursor]`）。
+
+## v0.5 新特性
+
+- **多数据源生态 2.0（OpenCode / Continue.dev / omp）**：
+  - **OpenCode 原生直读**：以纯只读模式（`PRAGMA query_only = ON;`）增量读取 `~/.local/share/opencode/opencode.db`，基于 `max(time_created)` 游标杜绝锁争抢；
+  - **Continue.dev 会话解析**：增量扫描并读取 `~/.continue/sessions/*.json`，结合 `(mtime, size)` 毫秒级跳过并提取 promptLogs 用量；
+  - **omp 独立项目分层接入**：递归扫描 `~/.omp/agent/sessions/**/*.jsonl`，按项目分层提取四维 Token 归一化指标；
+  - **工控微徽标矩阵升级**：会话列表与飞行记录仪全景适配 `[OpenCode]`（翡翠绿）、`[Continue]`（青蓝）、`[omp]`（深金黄）工控微徽标。
 ## 安装
 
-v0.1 尚未发布。发布后从 [GitHub Releases](https://github.com/johnhorse/token-watcher/releases)
-下载：macOS `.dmg`（universal）/ Windows `.msi`。
+从 [GitHub Releases](https://github.com/johnhorse/token-watcher/releases)
+下载：macOS `.dmg`（universal）/ Windows `.exe` / `.msi`。
 
 > 未签名说明：macOS 首次打开需右键 →「打开」（Gatekeeper）；Windows SmartScreen
 > 点「更多信息」→「仍要运行」。代码签名视社区反馈后置。
