@@ -980,29 +980,20 @@ impl<S: EventSink> DataEngine<S> {
                 relevant = true;
             }
             if !self.continue_sessions_watched
-                && path.starts_with(&self.paths.continue_sessions_root)
+                && self.is_continue_sessions_root(path)
                 && self.try_watch_continue_sessions()
             {
                 self.needs_catchup = true;
                 relevant = true;
             }
             if !self.omp_sessions_watched
-                && path.starts_with(&self.paths.omp_sessions_root)
+                && self.is_omp_sessions_root(path)
                 && self.try_watch_omp_sessions()
             {
                 self.needs_catchup = true;
                 relevant = true;
             }
-            if !self.opencode_watched
-                && (path == &self.paths.opencode_db_path
-                    || path.starts_with(
-                        self.paths
-                            .opencode_db_path
-                            .parent()
-                            .unwrap_or(&self.paths.opencode_db_path),
-                    ))
-                && self.try_watch_opencode()
-            {
+            if !self.opencode_watched && self.is_opencode_event(path) && self.try_watch_opencode() {
                 self.needs_catchup = true;
                 relevant = true;
             }
@@ -1130,6 +1121,40 @@ impl<S: EventSink> DataEngine<S> {
             (Some(root), Ok(canonical)) => canonical == *root,
             _ => false,
         }
+    }
+    fn is_continue_sessions_root(&self, path: &Path) -> bool {
+        if path == self.paths.continue_sessions_root {
+            return true;
+        }
+        match (
+            &self.continue_sessions_root_canonical,
+            fs::canonicalize(path),
+        ) {
+            (Some(root), Ok(canonical)) => canonical == *root,
+            _ => false,
+        }
+    }
+
+    fn is_omp_sessions_root(&self, path: &Path) -> bool {
+        if path == self.paths.omp_sessions_root {
+            return true;
+        }
+        match (&self.omp_sessions_root_canonical, fs::canonicalize(path)) {
+            (Some(root), Ok(canonical)) => canonical == *root,
+            _ => false,
+        }
+    }
+
+    fn is_opencode_event(&self, path: &Path) -> bool {
+        if path == self.paths.opencode_db_path {
+            return true;
+        }
+        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+            if file_name == "opencode.db" || file_name == "opencode.db-wal" {
+                return true;
+            }
+        }
+        false
     }
 
     /// 目录级变更事件处理（应对 macOS FSEvents 批量写聚合）：
