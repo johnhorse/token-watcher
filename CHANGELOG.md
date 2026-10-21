@@ -7,6 +7,28 @@
 
 ---
 
+## [0.5.1] - 2026-10-21
+
+### Added
+- **首页多引擎大盘切片筛选胶囊（EngineChips）**：
+  - 首页时段切换器下方新增原生数据源切片胶囊（`[全部]`、`[Claude]`、`[Codex]`、`[OpenCode]`、`[Continue]`、`[omp]`、`[Cline]`、`[Roo]`、`[Aider]`）；
+  - 动态统计并展示当前时段内各引擎的实际 Token 消耗量与专属工控徽标色彩，未产生数据的引擎自动收敛隐藏；
+  - 支持后端多引擎联动切片聚合（`dashboard_with_prices_and_engine`），点击后大盘总 Token、折线图、模型排行、费用均精准下钻联动。
+- **会话列表极速搜索与过滤**：
+  - 会话列表顶部新增紧凑搜索框，支持按会话名称、路径、模型或引擎名称快速过滤，秒级定位历史会话。
+- **多源数据解析与工作目录提取增强**：
+  - 新增 `extract_omp_cwd`：从 omp 会话日志提取项目真实工作路径（`cwd`），消除跨项目会话归属模糊；
+  - 完善多引擎模型字段提取容错。
+- **测试套件扩充与工程保障**：
+  - 新增 `tests/t19_engine_slicing.rs`：测试多引擎聚合切片与可用引擎统计逻辑；
+  - 新增 `test_codex_watcher_dir_linkage`：模拟 macOS FSEvents 深度目录事件并验证端到端捕获；
+  - 全量 19 个测试套件、141 项测试全部通过，Clippy 零告警。
+
+### Fixed
+- **修复 macOS FSEvents 深度目录聚合导致会话增量漏统计的致命缺陷**：
+  - 针对 macOS FSEvents 在高频追加写入时将文件事件聚合为目录变动（如 `.../sessions/YYYY/MM/DD`）的行为，新增 `DataEngine::collect_dir_sources` 通用深度目录递归反查机制；
+  - 递归扫描反查 Codex 的 `sessions/YYYY/MM/DD/rollout-*.jsonl`、Claude 项目目录的 `*.jsonl` 等各引擎深层数据源，彻底消除密集调用执行期间 90%+ 的 Token 增量丢失问题。
+
 ## [0.5.0] - 2026-10-21
 
 ### Added

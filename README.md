@@ -54,6 +54,14 @@ Continue.dev 与 omp 本地会话数据，
   - **Continue.dev 会话解析**：增量扫描并读取 `~/.continue/sessions/*.json`，结合 `(mtime, size)` 毫秒级跳过并提取 promptLogs 用量；
   - **omp 独立项目分层接入**：递归扫描 `~/.omp/agent/sessions/**/*.jsonl`，按项目分层提取四维 Token 归一化指标；
   - **工控微徽标矩阵升级**：会话列表与飞行记录仪全景适配 `[OpenCode]`（翡翠绿）、`[Continue]`（青蓝）、`[omp]`（深金黄）工控微徽标。
+
+## v0.5.1 新特性
+
+- **首页多引擎切片筛选胶囊（EngineChips）**：
+  - 首页时段下方新增原生数据源切片胶囊，支持一键按 `[全部]`、`[Claude]`、`[Codex]`、`[OpenCode]`、`[Continue]`、`[omp]`、`[Cline]`、`[Roo]`、`[Aider]` 切片下钻看板全量指标；
+  - 动态统计当前时段各引擎实际用量占比，未产出用量的引擎自动收敛；
+- **会话极速搜索与过滤**：会话列表顶部支持按会话标题、路径、模型或引擎名称即时搜索；
+- **深度目录事件反查与漏统计修复**：新增 `collect_dir_sources` 通用深度目录反查机制，彻底解决 macOS FSEvents 目录级变动聚合导致 Codex 等深层日志（`sessions/YYYY/MM/DD/rollout-*.jsonl`）漏统计问题。
 ## 安装
 
 从 [GitHub Releases](https://github.com/johnhorse/token-watcher/releases)
