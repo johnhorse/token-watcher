@@ -9,6 +9,7 @@
     type ScanStatus,
     type UiAdapter,
     type UsagePulse,
+    type UpdateInfo,
   } from "./data";
   import { t, type MessageKey } from "./i18n";
   import { formatCompact, formatCost, formatCostPrecise, formatExact } from "./format";
@@ -51,6 +52,8 @@
   let fetchFailed = $state(false);
   let selectedSessionId = $state<string | null>(null);
   let selectedEngine = $state<string | null>(null);
+  let updateInfo = $state<UpdateInfo | null>(null);
+  let updateDismissed = $state(false);
 
   let loadSeq = 0;
   let dirtyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -240,6 +243,17 @@
       }
     })();
 
+    void (async () => {
+      try {
+        const info = await adapter.checkUpdate();
+        if (info && info.has_update) {
+          updateInfo = info;
+        }
+      } catch (err) {
+        console.warn("checkUpdate failed", err);
+      }
+    })();
+
     return () => {
       offPulse();
       offDirty();
@@ -305,6 +319,31 @@
 </script>
 
 <div class="app">
+  {#if updateInfo && updateInfo.has_update && !updateDismissed}
+    <div class="update-banner">
+      <div class="update-content">
+        <span class="update-text">
+          {t("update.banner", { version: `v${updateInfo.latest_version.replace(/^v/i, "")}` })}
+        </span>
+        <button
+          type="button"
+          class="update-action-btn"
+          onclick={() => adapter.openExternalUrl(updateInfo!.release_url)}
+        >
+          {t("update.action")}
+        </button>
+      </div>
+      <button
+        type="button"
+        class="update-close-btn"
+        onclick={() => (updateDismissed = true)}
+        aria-label={t("update.dismiss")}
+        title={t("update.dismiss")}
+      >
+        ✕
+      </button>
+    </div>
+  {/if}
   <ErrorBanners {health} unavailable={fetchFailed} />
 
   {#if phase === "ready" && dashboard}
@@ -422,6 +461,64 @@
     min-height: 100%;
     box-sizing: border-box;
     padding: 16px 18px 22px;
+  }
+  .update-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 7px 10px;
+    margin-bottom: 12px;
+    background: color-mix(in srgb, var(--accent) 15%, var(--bg-1));
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-radius: var(--radius);
+    font-size: 12px;
+    animation: banner-slide-in 0.2s cubic-bezier(0.2, 0, 0, 1);
+  }
+  @keyframes banner-slide-in {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  .update-content {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .update-text {
+    color: var(--text-1);
+    font-weight: 500;
+  }
+  .update-action-btn {
+    background: var(--accent);
+    color: #141311;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+  }
+  .update-action-btn:hover {
+    opacity: 0.9;
+  }
+  .update-close-btn {
+    color: var(--text-2);
+    font-size: 11px;
+    padding: 2px 6px;
+    cursor: pointer;
+    border-radius: 2px;
+    line-height: 1;
+    transition: color 0.15s ease;
+  }
+  .update-close-btn:hover {
+    color: var(--text-1);
   }
   .totals {
     padding: 2px 0 12px;

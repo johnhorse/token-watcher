@@ -19,8 +19,8 @@ pub mod core;
 pub mod hud;
 pub mod proxy;
 pub mod tray;
+pub mod update;
 pub mod watch;
-
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -47,6 +47,8 @@ pub struct AppState {
     pub pricing: std::sync::Arc<core::pricing::PriceManager>,
     /// 自动配额同步器
     pub quota_syncer: std::sync::Arc<core::quota::QuotaSyncer>,
+    /// 版本更新检测器
+    pub updater: std::sync::Arc<update::UpdateChecker>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -71,6 +73,10 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             let _ = hud::show_main_window(app);
         }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(move |app| {
             // 写者锁（F5）：single-instance 已拦住同 app 的第二实例，
             // 这里拦的是 tw-ingest 等其他写进程。拿不到 → 提示并退出。
@@ -88,7 +94,22 @@ pub fn run() {
             // T5：托盘（复用 tauri.conf.json 创建的图标，挂菜单/事件/刷新线程）。
             // 托盘失败不阻塞数据管道：用断开通道降级，窗口仍可用。
             let settings_path = app_settings::path_for_db(&paths.db_path);
-            let settings = AppSettings::load(&settings_path);
+            let mut settings = AppSettings::load(&settings_path);
+
+            // 开机自启动同步：若 settings.autostart 为 None（首次运行），默认启用自启并持久化
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                let autolaunch = app.autolaunch();
+                if settings.autostart.is_none() {
+                    let _ = autolaunch.enable();
+                    settings.autostart = Some(true);
+                    let _ = settings.save(&settings_path);
+                } else if settings.autostart == Some(true) {
+                    let _ = autolaunch.enable();
+                } else {
+                    let _ = autolaunch.disable();
+                }
+            }
             let tray_tx = match tray::setup(app.handle(), &settings_path, &paths.db_path, &settings)
             {
                 Ok(tx) => tx,
@@ -120,8 +141,10 @@ pub fn run() {
                 proxy: Mutex::new(None),
                 pricing: pricing.clone(),
                 quota_syncer: quota_syncer.clone(),
+                updater: std::sync::Arc::new(update::UpdateChecker::new(
+                    env!("CARGO_PKG_VERSION").to_string(),
+                )),
             });
-
             let data = watch::spawn(app.handle().clone(), paths, tray_tx);
             let data_sender = data.sender();
             if let Some(state) = app.try_state::<AppState>() {
@@ -159,6 +182,7 @@ pub fn run() {
                     app.handle(),
                     true,
                     settings.hud_locked,
+                    settings.hud_mode,
                     settings.hud_x,
                     settings.hud_y,
                 ) {
@@ -245,6 +269,31 @@ pub fn run() {
                     let _ = settings.save(&settings_path);
                     let _ = app.emit("hud-updated", ());
                 }
+            } else if id == "hud-toggle-mode" {
+                if let Some(state) = app.try_state::<AppState>() {
+                    let settings_path = app_settings::path_for_db(&state.db_path);
+                    let mut settings = AppSettings::load(&settings_path);
+                    let next_mode = match settings.hud_mode {
+                        app_settings::HudMode::Widget => app_settings::HudMode::Capsule,
+                        app_settings::HudMode::Capsule => app_settings::HudMode::Widget,
+                    };
+                    settings.hud_mode = next_mode;
+                    let _ = settings.save(&settings_path);
+                    if let Some(win) = app.get_webview_window(hud::HUD_LABEL) {
+                        let (target_w, target_h) = hud::hud_size_for_mode(next_mode);
+                        let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+                            target_w, target_h,
+                        )));
+                        let (safe_x, safe_y) =
+                            hud::calculate_safe_position(app, settings.hud_x, settings.hud_y);
+                        let _ = win.set_position(tauri::Position::Logical(
+                            tauri::LogicalPosition::new(safe_x as f64, safe_y as f64),
+                        ));
+                    }
+                    tray::sync_hud_menu_items(app, &settings);
+                    let _ = app.emit("hud-mode-changed", next_mode.as_str());
+                    let _ = app.emit("hud-updated", ());
+                }
             } else if id == "hud-toggle-lock" {
                 if let Some(state) = app.try_state::<AppState>() {
                     let settings_path = app_settings::path_for_db(&state.db_path);
@@ -281,6 +330,10 @@ pub fn run() {
             commands::move_hud_by,
             commands::save_current_hud_position,
             commands::resize_hud,
+            commands::get_hud_mode,
+            commands::set_hud_mode,
+            commands::check_update,
+            commands::open_external_url,
             commands::show_hud_context_menu,
             commands::toggle_hud_metric,
             commands::log_js_error,

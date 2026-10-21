@@ -4,15 +4,28 @@
   import { t } from "../i18n";
   import type { ModelRow } from "../data";
 
-  let { models }: { models: ModelRow[] } = $props();
+  let {
+    models,
+    limit,
+    totalCount,
+    onMore,
+  }: {
+    models: ModelRow[];
+    limit?: number;
+    totalCount?: number;
+    onMore?: () => void;
+  } = $props();
 
-  let max = $derived(Math.max(1, ...models.map((row) => row.tokens)));
+  let visibleModels = $derived(limit !== undefined ? models.slice(0, limit) : models);
+  let effectiveTotal = $derived(totalCount ?? models.length);
+  let extraCount = $derived(Math.max(0, effectiveTotal - visibleModels.length));
+  let max = $derived(Math.max(1, ...visibleModels.map((row) => row.tokens)));
 </script>
 
 <section class="section">
   <h2>{t("models.title")}</h2>
   <ul>
-    {#each models as row (row.model)}
+    {#each visibleModels as row (row.model)}
       <li>
         <div class="row">
           <span class="name" title={row.model}>{row.model}</span>
@@ -31,6 +44,13 @@
       </li>
     {/each}
   </ul>
+  {#if extraCount > 0 && onMore}
+    <div class="more-row">
+      <button type="button" class="more-btn" onclick={onMore}>
+        {t("models.more", { n: extraCount })}
+      </button>
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -83,5 +103,22 @@
     display: block;
     height: 100%;
     background: var(--text-2);
+  }
+  .more-row {
+    margin-top: 8px;
+    display: flex;
+    justify-content: flex-end;
+  }
+  .more-btn {
+    font-size: 11px;
+    color: var(--amber);
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 2px;
+    transition: opacity 0.15s ease;
+  }
+  .more-btn:hover {
+    opacity: 0.8;
+    text-decoration: underline;
   }
 </style>

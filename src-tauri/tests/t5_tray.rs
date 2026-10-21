@@ -119,6 +119,29 @@ fn window_menu_labels_display_main_window() {
 }
 
 #[test]
+fn tray_menu_autostart_and_hud_mode_labels() {
+    use token_watcher_lib::app_settings::HudMode;
+    assert_eq!(Lang::Zh.autostart(), "开机自动启动");
+    assert_eq!(Lang::En.autostart(), "Launch at Startup");
+    assert_eq!(
+        Lang::Zh.hud_mode_label(HudMode::Widget),
+        "形态: 卡片小组件 (点击切换)"
+    );
+    assert_eq!(
+        Lang::Zh.hud_mode_label(HudMode::Capsule),
+        "形态: 极简胶囊 (点击切换)"
+    );
+    assert_eq!(
+        Lang::En.hud_mode_label(HudMode::Widget),
+        "Mode: Widget Card (Click to Switch)"
+    );
+    assert_eq!(
+        Lang::En.hud_mode_label(HudMode::Capsule),
+        "Mode: Capsule Bar (Click to Switch)"
+    );
+}
+
+#[test]
 fn multi_metric_tray_display_and_cache_rate() {
     // 单选缓存率测试
     let single_rate = display(Lang::Zh, TrayMetric::CacheRate, 85);
@@ -153,8 +176,19 @@ fn settings_roundtrip_shape_and_missing_file() {
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(value["tray_metric"], "cache_read");
     assert_eq!(AppSettings::load(&path), custom);
-}
 
+    // 测试 autostart 显式序列化与默认行为
+    let mut custom_auto = custom.clone();
+    custom_auto.autostart = Some(false);
+    custom_auto.save(&path).unwrap();
+    let loaded = AppSettings::load(&path);
+    assert_eq!(loaded.autostart, Some(false));
+    assert!(!loaded.is_autostart_enabled());
+
+    let default_settings = AppSettings::default();
+    assert_eq!(default_settings.autostart, None);
+    assert!(default_settings.is_autostart_enabled());
+}
 #[test]
 fn settings_corrupt_falls_back_and_rebuilds() {
     let dir = temp_dir("corrupt");

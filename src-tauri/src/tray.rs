@@ -40,8 +40,9 @@ const ID_CACHE_RATE: &str = "metric-cache-rate";
 const ID_TOGGLE_WINDOW: &str = "toggle-window";
 const ID_QUIT: &str = "quit";
 const ID_HUD_VISIBLE: &str = "hud-visible";
+const ID_HUD_MODE: &str = "hud-mode";
 const ID_HUD_LOCKED: &str = "hud-locked";
-
+const ID_AUTOSTART: &str = "autostart";
 /// 托盘线程命令：数据变化来自数据线程，指标切换来自菜单
 pub enum TrayCommand {
     DataChanged,
@@ -122,6 +123,26 @@ impl Lang {
         match self {
             Lang::Zh => "锁定 HUD (鼠标穿透)",
             Lang::En => "Lock HUD (Click-Through)",
+        }
+    }
+
+    pub fn hud_mode_label(self, mode: crate::app_settings::HudMode) -> &'static str {
+        match (self, mode) {
+            (Lang::Zh, crate::app_settings::HudMode::Widget) => "形态: 卡片小组件 (点击切换)",
+            (Lang::Zh, crate::app_settings::HudMode::Capsule) => "形态: 极简胶囊 (点击切换)",
+            (Lang::En, crate::app_settings::HudMode::Widget) => {
+                "Mode: Widget Card (Click to Switch)"
+            }
+            (Lang::En, crate::app_settings::HudMode::Capsule) => {
+                "Mode: Capsule Bar (Click to Switch)"
+            }
+        }
+    }
+
+    pub fn autostart(self) -> &'static str {
+        match self {
+            Lang::Zh => "开机自动启动",
+            Lang::En => "Launch at Startup",
         }
     }
 
@@ -242,7 +263,9 @@ fn metric_from_id(id: &str) -> Option<TrayMetric> {
 /// （如 single-instance 唤起窗口）同步「显示/隐藏悬浮窗」文案。
 static WINDOW_ITEM: OnceLock<MenuItem<Wry>> = OnceLock::new();
 static HUD_VISIBLE_ITEM: OnceLock<CheckMenuItem<Wry>> = OnceLock::new();
+static HUD_MODE_ITEM: OnceLock<MenuItem<Wry>> = OnceLock::new();
 static HUD_LOCKED_ITEM: OnceLock<CheckMenuItem<Wry>> = OnceLock::new();
+static AUTOSTART_ITEM: OnceLock<CheckMenuItem<Wry>> = OnceLock::new();
 static LANG: OnceLock<Lang> = OnceLock::new();
 
 /// 托盘初始化：复用 tauri.conf.json 创建的图标，挂菜单 / 事件 / 刷新线程。
@@ -271,12 +294,27 @@ pub fn setup(
         initial_settings.hud_visible,
         None::<&str>,
     )?;
+    let hud_mode_item = MenuItem::with_id(
+        app,
+        ID_HUD_MODE,
+        lang.hud_mode_label(initial_settings.hud_mode),
+        initial_settings.hud_visible,
+        None::<&str>,
+    )?;
     let hud_locked_item = CheckMenuItem::with_id(
         app,
         ID_HUD_LOCKED,
         lang.hud_locked(),
         initial_settings.hud_visible,
         initial_settings.hud_locked,
+        None::<&str>,
+    )?;
+    let autostart_item = CheckMenuItem::with_id(
+        app,
+        ID_AUTOSTART,
+        lang.autostart(),
+        true,
+        initial_settings.is_autostart_enabled(),
         None::<&str>,
     )?;
     let window_visible = app
@@ -300,15 +338,19 @@ pub fn setup(
         .collect();
     items.push(&sep1);
     items.push(&hud_visible_item);
+    items.push(&hud_mode_item);
     items.push(&hud_locked_item);
     items.push(&sep2);
+    items.push(&autostart_item);
     items.push(&toggle);
     items.push(&sep3);
     items.push(&quit);
     tray.set_menu(Some(Menu::with_items(app, &items)?))?;
 
     let _ = HUD_VISIBLE_ITEM.set(hud_visible_item);
+    let _ = HUD_MODE_ITEM.set(hud_mode_item);
     let _ = HUD_LOCKED_ITEM.set(hud_locked_item);
+    let _ = AUTOSTART_ITEM.set(autostart_item);
 
     // 文案同步用的全局句柄（set 失败只可能是重复初始化，忽略）
     let _ = WINDOW_ITEM.set(toggle);
@@ -369,10 +411,35 @@ pub fn setup(
                 app,
                 settings.hud_visible,
                 settings.hud_locked,
+                settings.hud_mode,
                 settings.hud_x,
                 settings.hud_y,
             );
             sync_hud_menu_items(app, &settings);
+        } else if id == ID_HUD_MODE {
+            use tauri::Emitter;
+            let mut settings = AppSettings::load(&settings_path);
+            let next_mode = match settings.hud_mode {
+                crate::app_settings::HudMode::Widget => crate::app_settings::HudMode::Capsule,
+                crate::app_settings::HudMode::Capsule => crate::app_settings::HudMode::Widget,
+            };
+            settings.hud_mode = next_mode;
+            let _ = settings.save(&settings_path);
+            if let Some(win) = app.get_webview_window(crate::hud::HUD_LABEL) {
+                let (target_w, target_h) = crate::hud::hud_size_for_mode(next_mode);
+                let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+                    target_w, target_h,
+                )));
+                let (safe_x, safe_y) =
+                    crate::hud::calculate_safe_position(app, settings.hud_x, settings.hud_y);
+                let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
+                    safe_x as f64,
+                    safe_y as f64,
+                )));
+            }
+            sync_hud_menu_items(app, &settings);
+            let _ = app.emit("hud-mode-changed", next_mode.as_str());
+            let _ = app.emit("hud-updated", ());
         } else if id == ID_HUD_LOCKED {
             let mut settings = AppSettings::load(&settings_path);
             settings.hud_locked = !settings.hud_locked;
@@ -381,6 +448,20 @@ pub fn setup(
                 let _ = crate::hud::apply_hud_locked(&win, settings.hud_locked);
             }
             sync_hud_menu_items(app, &settings);
+        } else if id == ID_AUTOSTART {
+            use tauri_plugin_autostart::ManagerExt;
+            let mut settings = AppSettings::load(&settings_path);
+            let current_enabled = settings.is_autostart_enabled();
+            let new_enabled = !current_enabled;
+            let autolaunch = app.autolaunch();
+            if new_enabled {
+                let _ = autolaunch.enable();
+            } else {
+                let _ = autolaunch.disable();
+            }
+            settings.autostart = Some(new_enabled);
+            let _ = settings.save(&settings_path);
+            sync_autostart_menu_item(new_enabled);
         } else if id == ID_TOGGLE_WINDOW {
             toggle_main_window(app);
         } else if id == ID_QUIT {
@@ -472,9 +553,21 @@ pub fn sync_hud_menu_items(_app: &AppHandle, settings: &AppSettings) {
     if let Some(item) = HUD_VISIBLE_ITEM.get() {
         let _ = item.set_checked(settings.hud_visible);
     }
+    if let Some(item) = HUD_MODE_ITEM.get() {
+        let lang = LANG.get().copied().unwrap_or(Lang::Zh);
+        let _ = item.set_text(lang.hud_mode_label(settings.hud_mode));
+        let _ = item.set_enabled(settings.hud_visible);
+    }
     if let Some(item) = HUD_LOCKED_ITEM.get() {
         let _ = item.set_checked(settings.hud_locked);
         let _ = item.set_enabled(settings.hud_visible);
+    }
+}
+
+/// 同步自启动菜单项勾选状态
+pub fn sync_autostart_menu_item(enabled: bool) {
+    if let Some(item) = AUTOSTART_ITEM.get() {
+        let _ = item.set_checked(enabled);
     }
 }
 

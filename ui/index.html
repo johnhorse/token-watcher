@@ -4,12 +4,35 @@
     <script>
       (function () {
         try {
+          if (
+            window.location.search.indexOf("window=hud") !== -1 ||
+            window.location.hash === "#hud" ||
+            (window.__TAURI_INTERNALS__ &&
+              window.__TAURI_INTERNALS__.metadata &&
+              window.__TAURI_INTERNALS__.metadata.currentWindow &&
+              window.__TAURI_INTERNALS__.metadata.currentWindow.label === "hud")
+          ) {
+            document.documentElement.setAttribute("data-hud", "true");
+          }
+        } catch (e) {}
+        try {
           var t = localStorage.getItem("token_watcher_theme");
           if (t === "slate" || t === "mint" || t === "meter-face") {
             document.documentElement.setAttribute("data-theme", t);
           }
         } catch (e) {}
       })();
+    </script>
+    <style>
+      html[data-hud],
+      html[data-hud] body,
+      html[data-hud] #app {
+        background: transparent !important;
+        background-color: transparent !important;
+        overflow: hidden !important;
+      }
+    </style>
+    <script>
       window.addEventListener("error", function (e) {
         var msg = "[JS_ERROR] " + e.message + " (" + e.filename + ":" + e.lineno + ")";
         if (window.__TAURI_INTERNALS__) {

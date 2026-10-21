@@ -129,3 +129,33 @@ fn test_app_settings_hud_fields_roundtrip() {
     assert_eq!(loaded_neg.hud_x, Some(-320));
     assert_eq!(loaded_neg.hud_y, Some(-100));
 }
+
+#[test]
+fn test_app_settings_hud_mode_roundtrip() {
+    use token_watcher_lib::app_settings::HudMode;
+    let dir = std::env::temp_dir().join(format!("tw_test_hud_mode_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+
+    let mut settings = AppSettings::default();
+    assert_eq!(settings.hud_mode, HudMode::Widget);
+    assert_eq!(settings.hud_mode.as_str(), "widget");
+
+    settings.hud_mode = HudMode::Capsule;
+    assert_eq!(settings.hud_mode.as_str(), "capsule");
+    settings.save(&path).unwrap();
+
+    let loaded = AppSettings::load(&path);
+    assert_eq!(loaded.hud_mode, HudMode::Capsule);
+
+    // 校验尺寸映射
+    assert_eq!(
+        token_watcher_lib::hud::hud_size_for_mode(HudMode::Widget),
+        (320.0, 390.0)
+    );
+    assert_eq!(
+        token_watcher_lib::hud::hud_size_for_mode(HudMode::Capsule),
+        (250.0, 34.0)
+    );
+}

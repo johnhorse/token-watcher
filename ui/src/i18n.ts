@@ -125,6 +125,15 @@ const zh = {
   "engine.all": "全部",
   "sessions.search": "搜索会话...",
   "sessions.noMatches": "未找到匹配会话",
+  "update.banner": "🎉 发现新版本 {version}",
+  "update.action": "查看更新",
+  "update.dismiss": "关闭提醒",
+  "models.more": "+{n} 更多模型 →",
+  "models.moreSimple": "更多模型 →",
+  "hud.switchToCapsule": "切换为极简胶囊",
+  "hud.switchToWidget": "切换为卡片小组件",
+  "hud.dragHandle": "拖拽移动",
+  "hud.todayLabel": "今日",
 } as const;
 
 export type MessageKey = keyof typeof zh;
@@ -252,8 +261,16 @@ const en: Record<MessageKey, string> = {
   "engine.all": "All",
   "sessions.search": "Search sessions...",
   "sessions.noMatches": "No matching sessions",
+  "update.banner": "🎉 New version available: {version}",
+  "update.action": "View Release",
+  "update.dismiss": "Dismiss",
+  "models.more": "+{n} more models →",
+  "models.moreSimple": "More models →",
+  "hud.switchToCapsule": "Switch to Capsule",
+  "hud.switchToWidget": "Switch to Widget",
+  "hud.dragHandle": "Drag to move",
+  "hud.todayLabel": "Today",
 };
-
 const dict: Record<Lang, Record<MessageKey, string>> = { zh, en };
 function detectLang(): Lang {
   const override = new URLSearchParams(window.location.search).get("lang");

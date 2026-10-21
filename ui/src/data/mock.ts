@@ -17,6 +17,8 @@ import type {
   UsagePulse,
   ProxyStatus,
   SessionFlightRecorder,
+  UpdateInfo,
+  HudMode,
 } from "./types";
 
 const params = new URLSearchParams(window.location.search);
@@ -567,6 +569,9 @@ try {
   }
 } catch {}
 const themeSubs = new Set<(theme: string) => void>();
+let currentHudMode: HudMode = "widget";
+const hudModeSubs = new Set<(mode: HudMode) => void>();
+const hudUpdatedSubs = new Set<() => void>();
 
 
 export function createMockAdapter(): UiAdapter {
@@ -707,9 +712,36 @@ export function createMockAdapter(): UiAdapter {
     async toggleHudMetric(metric: string) {
       return ["current_rate", "session_total", "cache_rate"];
     },
-    async resizeHud() {},
+    async resizeHud(width: number, height?: number) {},
+    async checkUpdate() {
+      const hasUpdate = params.get("update") !== "none";
+      return {
+        has_update: hasUpdate,
+        current_version: "0.5.1",
+        latest_version: "0.6.0",
+        release_url: "https://github.com/johnhorse/token-watcher/releases/latest",
+      };
+    },
+    async openExternalUrl(url: string) {
+      if (typeof window !== "undefined") {
+        window.open(url, "_blank");
+      }
+    },
+    async getHudMode() {
+      return currentHudMode;
+    },
+    async setHudMode(mode: HudMode) {
+      currentHudMode = mode;
+      for (const cb of hudModeSubs) cb(mode);
+      for (const cb of hudUpdatedSubs) cb();
+    },
+    onHudModeChanged(cb) {
+      hudModeSubs.add(cb);
+      return () => hudModeSubs.delete(cb);
+    },
     onHudUpdated(cb) {
-      return () => {};
+      hudUpdatedSubs.add(cb);
+      return () => hudUpdatedSubs.delete(cb);
     },
 
     onPulse(cb) {

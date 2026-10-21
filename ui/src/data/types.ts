@@ -2,6 +2,15 @@
 
 export type Range = "today" | "week" | "month" | "all";
 
+export interface UpdateInfo {
+  has_update: boolean;
+  current_version: string;
+  latest_version: string;
+  release_url: string;
+}
+
+export type HudMode = "widget" | "capsule";
+
 export interface TokenTotals {
   input: number;
   output: number;
@@ -227,8 +236,13 @@ export interface UiAdapter {
   onSessionFlightUpdated?: (cb: (payload: { session_id: string }) => void) => Unsubscribe;
   showHudContextMenu(): Promise<void>;
   toggleHudMetric(metric: string): Promise<string[]>;
-  resizeHud(width: number): Promise<void>;
-  onHudUpdated?: (cb: () => void) => Unsubscribe;
+    resizeHud(width: number, height?: number): Promise<void>;
+    checkUpdate(): Promise<UpdateInfo>;
+    openExternalUrl(url: string): Promise<void>;
+    getHudMode(): Promise<HudMode>;
+    setHudMode(mode: HudMode): Promise<void>;
+    onHudModeChanged?: (cb: (mode: HudMode) => void) => Unsubscribe;
+    onHudUpdated?: (cb: () => void) => Unsubscribe;
 
   onPulse(cb: (pulse: UsagePulse) => void): Unsubscribe;
   onScanProgress(cb: (status: ScanStatus) => void): Unsubscribe;

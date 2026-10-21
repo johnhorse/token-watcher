@@ -44,6 +44,31 @@ impl ThemeMode {
     }
 }
 
+/// HUD 形态模式：卡片小组件 vs 极简胶囊条
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum HudMode {
+    #[default]
+    Widget,
+    Capsule,
+}
+
+impl HudMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Widget => "widget",
+            Self::Capsule => "capsule",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s {
+            "capsule" => Self::Capsule,
+            _ => Self::Widget,
+        }
+    }
+}
+
 /// app 自身设置（未来字段一律给 serde 默认值，保证旧文件可读）
 pub fn default_hud_metrics() -> Vec<String> {
     vec![
@@ -77,6 +102,10 @@ pub struct AppSettings {
     pub hud_y: Option<i32>,
     /// 主题模式（默认 MeterFace 经典工控仪表）
     pub theme: ThemeMode,
+    /// 开机自启动设置（None 表示首次运行未初始化，默认行为视为 true）
+    pub autostart: Option<bool>,
+    /// HUD 形态（默认 Widget 卡片小组件）
+    pub hud_mode: HudMode,
 }
 
 impl Default for AppSettings {
@@ -90,6 +119,8 @@ impl Default for AppSettings {
             hud_x: None,
             hud_y: None,
             theme: ThemeMode::MeterFace,
+            autostart: None,
+            hud_mode: HudMode::Widget,
         }
     }
 }
@@ -110,6 +141,11 @@ impl AppSettings {
         } else {
             self.hud_metrics.clone()
         }
+    }
+
+    /// 是否启用开机自启：None 时遵循首次启动默认启用 (true)
+    pub fn is_autostart_enabled(&self) -> bool {
+        self.autostart.unwrap_or(true)
     }
 
     /// 读取设置：文件不存在/不可读 → 默认值；内容损坏 → 默认值并重建文件。

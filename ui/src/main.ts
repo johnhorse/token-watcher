@@ -16,6 +16,9 @@ if (typeof window !== "undefined") {
     }
   }
 }
+if (isHud && typeof document !== "undefined") {
+  document.documentElement.setAttribute("data-hud", "true");
+}
 
 const app = mount(isHud ? HudApp : App, {
   target: document.getElementById("app")!,

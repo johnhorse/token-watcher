@@ -15,6 +15,8 @@ import type {
   HudSummary,
   Quota,
   SessionFlightRecorder,
+  UpdateInfo,
+  HudMode,
 } from "./types";
 
 function subscribe<T>(event: string, cb: (payload: T) => void): Unsubscribe {
@@ -85,7 +87,13 @@ export function createTauriAdapter(): UiAdapter {
     onSessionFlightUpdated: (cb) => subscribe<{ session_id: string }>("session-flight-updated", cb),
     showHudContextMenu: () => invoke<void>("show_hud_context_menu"),
     toggleHudMetric: (metric: string) => invoke<string[]>("toggle_hud_metric", { metric }),
-    resizeHud: (width: number) => invoke<void>("resize_hud", { width }),
+    resizeHud: (width: number, height?: number) =>
+      invoke<void>("resize_hud", { width, height: height ?? null }),
+    checkUpdate: () => invoke<UpdateInfo>("check_update"),
+    openExternalUrl: (url: string) => invoke<void>("open_external_url", { url }),
+    getHudMode: () => invoke<HudMode>("get_hud_mode"),
+    setHudMode: (mode: HudMode) => invoke<void>("set_hud_mode", { mode }),
+    onHudModeChanged: (cb) => subscribe<HudMode>("hud-mode-changed", cb),
     onHudUpdated: (cb) => subscribe<void>("hud-updated", () => cb()),
 
 

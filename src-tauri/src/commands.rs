@@ -338,6 +338,7 @@ pub fn set_hud_visible(
         &app,
         visible,
         settings.hud_locked,
+        settings.hud_mode,
         settings.hud_x,
         settings.hud_y,
     )?;
@@ -387,13 +388,86 @@ pub fn move_hud_by(app: AppHandle, dx: f64, dy: f64) -> Result<(), String> {
     Ok(())
 }
 #[tauri::command]
-pub fn resize_hud(app: AppHandle, width: f64) -> Result<(), String> {
+pub fn resize_hud(app: AppHandle, width: f64, height: Option<f64>) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(crate::hud::HUD_LABEL) {
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-            width,
-            crate::hud::HUD_HEIGHT,
+        let h = height.unwrap_or(crate::hud::HUD_HEIGHT);
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, h)));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_hud_mode(state: State<'_, AppState>) -> Result<String, String> {
+    let settings_path = crate::app_settings::path_for_db(&state.db_path);
+    let settings = crate::app_settings::AppSettings::load(&settings_path);
+    Ok(settings.hud_mode.as_str().to_string())
+}
+
+#[tauri::command]
+pub fn set_hud_mode(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mode: String,
+) -> Result<String, String> {
+    let new_mode = crate::app_settings::HudMode::from_str_loose(&mode);
+    let settings_path = crate::app_settings::path_for_db(&state.db_path);
+    let mut settings = crate::app_settings::AppSettings::load(&settings_path);
+    settings.hud_mode = new_mode;
+    settings.save(&settings_path).map_err(|e| e.to_string())?;
+
+    if let Some(win) = app.get_webview_window(crate::hud::HUD_LABEL) {
+        let (target_w, target_h) = crate::hud::hud_size_for_mode(new_mode);
+        let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+            target_w, target_h,
+        )));
+        let (safe_x, safe_y) =
+            crate::hud::calculate_safe_position(&app, settings.hud_x, settings.hud_y);
+        let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
+            safe_x as f64,
+            safe_y as f64,
         )));
     }
+
+    crate::tray::sync_hud_menu_items(&app, &settings);
+    let _ = app.emit("hud-mode-changed", new_mode.as_str());
+    let _ = app.emit("hud-updated", ());
+    Ok(new_mode.as_str().to_string())
+}
+
+#[tauri::command]
+pub async fn check_update(state: State<'_, AppState>) -> Result<crate::update::UpdateInfo, String> {
+    state.updater.check().await
+}
+
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return Err("仅支持打开 http:// 或 https:// 协议链接".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(trimmed)
+            .spawn()
+            .map_err(|e| format!("打开链接失败: {e}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", trimmed])
+            .spawn()
+            .map_err(|e| format!("打开链接失败: {e}"))?;
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(trimmed)
+            .spawn()
+            .map_err(|e| format!("打开链接失败: {e}"))?;
+    }
+
     Ok(())
 }
 

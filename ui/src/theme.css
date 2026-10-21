@@ -158,6 +158,14 @@ body {
   background: transparent;
 }
 
+html[data-hud],
+html[data-hud] body,
+html[data-hud] #app {
+  background: transparent !important;
+  background-color: transparent !important;
+  overflow: hidden !important;
+}
+
 button {
   font: inherit;
   color: inherit;

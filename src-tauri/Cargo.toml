@@ -1,6 +1,6 @@
 [package]
 name = "token-watcher"
-version = "0.5.1"
+version = "0.6.0"
 description = "Cross-platform AI token usage monitor for Claude Code — menu bar + floating widget"
 authors = ["johnhorse"]
 license = "MIT"
@@ -30,6 +30,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 # D15 单实例守卫：第二实例唤起主窗后退出（必须最先注册的插件）
 tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
