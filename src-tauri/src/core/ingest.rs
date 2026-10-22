@@ -20,9 +20,10 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use super::parse::{
-    extract_cline_model, parse_aider_line, parse_cline_roo_entries, parse_codex_line,
-    parse_continue_session, parse_line, parse_omp_line, parse_opencode_message,
-    AiderSessionTracker, CodexFileState, ParsedLine, UsageRecord,
+    extract_cline_model, parse_aider_line, parse_antigravity_db, parse_cline_roo_entries,
+    parse_codex_line, parse_continue_session, parse_line, parse_omp_line, parse_opencode_message,
+    parse_qoder_line, parse_workbuddy_line, parse_zcode_line, AiderSessionTracker, CodexFileState,
+    ParsedLine, UsageRecord,
 };
 use super::store::{Checkpoint, Store};
 use super::CoreError;
@@ -62,6 +63,10 @@ pub enum FileEngineKind {
     OpenCode,
     Continue,
     Omp,
+    Antigravity,
+    ZCode,
+    Qoder,
+    WorkBuddy,
 }
 
 /// 依据文件名及内容抽样自动判定文件所属引擎
@@ -71,8 +76,47 @@ pub fn detect_file_kind(path: &Path, sample_bytes: &[u8]) -> FileEngineKind {
         .and_then(|n| n.to_str())
         .unwrap_or_default();
     let path_str = path.to_string_lossy();
-    if filename == "opencode.db" || (filename.ends_with(".db") && path_str.contains("opencode")) {
+    if filename.ends_with(".db")
+        && (path_str.contains("/.gemini/antigravity/")
+            || path_str.contains("\\.gemini\\antigravity\\")
+            || path_str.contains("/antigravity/")
+            || path_str.contains("\\antigravity\\"))
+    {
+        return FileEngineKind::Antigravity;
+    }
+    if filename == "opencode.db"
+        || (filename.ends_with(".db")
+            && (path_str.contains("/opencode/") || path_str.contains("\\opencode\\")))
+    {
         return FileEngineKind::OpenCode;
+    }
+    if filename.ends_with(".jsonl")
+        && (path_str.contains("/.zcode/")
+            || path_str.contains("\\.zcode\\")
+            || path_str.contains("/zcode/")
+            || path_str.contains("\\zcode\\"))
+    {
+        return FileEngineKind::ZCode;
+    }
+    if filename.ends_with(".jsonl")
+        && (path_str.contains("/.qoder/")
+            || path_str.contains("\\.qoder\\")
+            || path_str.contains("/qoder/")
+            || path_str.contains("\\qoder\\"))
+    {
+        return FileEngineKind::Qoder;
+    }
+    if filename.ends_with(".jsonl")
+        && (path_str.contains("/.codebuddy/")
+            || path_str.contains("\\.codebuddy\\")
+            || path_str.contains("/.workbuddy/")
+            || path_str.contains("\\.workbuddy\\")
+            || path_str.contains("/codebuddy/")
+            || path_str.contains("\\codebuddy\\")
+            || path_str.contains("/workbuddy/")
+            || path_str.contains("\\workbuddy\\"))
+    {
+        return FileEngineKind::WorkBuddy;
     }
     if filename.ends_with(".json")
         && (path_str.contains(".continue") || path_str.contains("continue"))
@@ -370,6 +414,44 @@ pub fn ingest_file_with_records(
         return Ok((stats, records));
     }
 
+    if engine_kind == FileEngineKind::Antigravity {
+        let mut previous_idx = -1i64;
+        let mut is_truncated = false;
+        if let Some(c) = store.get_checkpoint(&key)? {
+            // 大小与修改时间一致时短路跳过，避免重复轮询 SQLite 产生开销
+            if c.mtime_ms == mtime_ms && c.size == size {
+                return Ok((FileIngestStats::default(), Vec::new()));
+            }
+            if size < c.size || mtime_ms < c.mtime_ms {
+                is_truncated = true;
+                previous_idx = -1;
+            } else {
+                previous_idx = c.byte_offset;
+            }
+        }
+
+        let (records, max_idx) = parse_antigravity_db(path, previous_idx)?;
+        if !records.is_empty() {
+            store.upsert_records(&records)?;
+        }
+        if max_idx > previous_idx || is_truncated {
+            store.set_checkpoint(
+                &key,
+                Checkpoint {
+                    byte_offset: max_idx,
+                    mtime_ms,
+                    size,
+                },
+            )?;
+        }
+        let stats = FileIngestStats {
+            records: records.len() as u64,
+            bad_lines: 0,
+            truncated: is_truncated,
+        };
+        return Ok((stats, records));
+    }
+
     let mut truncated = false;
     let mut offset = 0i64;
     if let Some(checkpoint) = store.get_checkpoint(&key)? {
@@ -417,15 +499,23 @@ pub fn ingest_file_with_records(
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("omp-session");
+            let file_session_id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("session");
             let parsed = match engine_kind {
                 FileEngineKind::ClaudeCode => parse_line(line),
                 FileEngineKind::CodexCli => parse_codex_line(line, &mut codex_state),
                 FileEngineKind::Aider => parse_aider_line(line, &mut aider_tracker),
                 FileEngineKind::Omp => parse_omp_line(line, omp_session_id, omp_cwd.as_deref()),
+                FileEngineKind::ZCode => parse_zcode_line(line, file_session_id),
+                FileEngineKind::Qoder => parse_qoder_line(line, file_session_id),
+                FileEngineKind::WorkBuddy => parse_workbuddy_line(line, file_session_id),
                 FileEngineKind::Cline
                 | FileEngineKind::RooCode
                 | FileEngineKind::OpenCode
-                | FileEngineKind::Continue => ParsedLine::Ignored,
+                | FileEngineKind::Continue
+                | FileEngineKind::Antigravity => ParsedLine::Ignored,
             };
             match parsed {
                 ParsedLine::Record(record) => records.push(record),
@@ -445,15 +535,23 @@ pub fn ingest_file_with_records(
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("omp-session");
+        let file_session_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("session");
         let parsed = match engine_kind {
             FileEngineKind::ClaudeCode => parse_line(tail),
             FileEngineKind::CodexCli => parse_codex_line(tail, &mut codex_state),
             FileEngineKind::Aider => parse_aider_line(tail, &mut aider_tracker),
             FileEngineKind::Omp => parse_omp_line(tail, omp_session_id, omp_cwd.as_deref()),
+            FileEngineKind::ZCode => parse_zcode_line(tail, file_session_id),
+            FileEngineKind::Qoder => parse_qoder_line(tail, file_session_id),
+            FileEngineKind::WorkBuddy => parse_workbuddy_line(tail, file_session_id),
             FileEngineKind::Cline
             | FileEngineKind::RooCode
             | FileEngineKind::OpenCode
-            | FileEngineKind::Continue => ParsedLine::Ignored,
+            | FileEngineKind::Continue
+            | FileEngineKind::Antigravity => ParsedLine::Ignored,
         };
         match parsed {
             ParsedLine::Record(record) => records.push(record),
@@ -561,7 +659,11 @@ pub fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>, dirs_failed: &mu
                 && (path.to_string_lossy().contains(".continue")
                     || path.to_string_lossy().contains("continue"));
             let is_opencode = path.file_name().and_then(|n| n.to_str()) == Some("opencode.db");
-            if is_jsonl || is_ui_messages || is_continue || is_opencode {
+            let is_antigravity = path.extension().and_then(|e| e.to_str()) == Some("db")
+                && (path.to_string_lossy().contains("antigravity")
+                    || path.to_string_lossy().contains(".gemini")
+                    || path.to_string_lossy().contains("gemini"));
+            if is_jsonl || is_ui_messages || is_continue || is_opencode || is_antigravity {
                 out.push(path);
             }
         }
@@ -585,6 +687,30 @@ mod tests {
         );
         assert_eq!(
             detect_file_kind(Path::new("sess-123.jsonl"), b"{\"type\":\"assistant\"}"),
+            FileEngineKind::ClaudeCode
+        );
+        assert_eq!(
+            detect_file_kind(Path::new("/Users/u/.gemini/antigravity/conversations/conv.db"), b""),
+            FileEngineKind::Antigravity
+        );
+        assert_eq!(
+            detect_file_kind(Path::new("/Users/u/.zcode/cli/rollout/model-io-session_123.jsonl"), b""),
+            FileEngineKind::ZCode
+        );
+        assert_eq!(
+            detect_file_kind(Path::new("/Users/u/.qoder/projects/demo/session.jsonl"), b""),
+            FileEngineKind::Qoder
+        );
+        assert_eq!(
+            detect_file_kind(Path::new("/Users/u/.codebuddy/projects/demo/session.jsonl"), b""),
+            FileEngineKind::WorkBuddy
+        );
+        // 确保包含引擎名称的普通 Claude 项目目录绝不被误判
+        assert_eq!(
+            detect_file_kind(
+                Path::new("/Users/u/.claude/projects/-qoder-demo/sess.jsonl"),
+                b"{\"type\":\"assistant\"}"
+            ),
             FileEngineKind::ClaudeCode
         );
     }

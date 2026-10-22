@@ -1,0 +1,2 @@
+{"type":"assistant","model":"hunyuan-code","usage":{"input_tokens":1000,"output_tokens":250,"cache_read_input_tokens":600,"cache_creation_input_tokens":0},"message_id":"wb-msg-01","created_at":1792640000000}
+{"type":"assistant","model":"hunyuan-code","usage":{"input_tokens":1400,"output_tokens":300,"cache_read_input_tokens":900,"cache_creation_input_tokens":50},"message_id":"wb-msg-02","created_at":1792640300000}

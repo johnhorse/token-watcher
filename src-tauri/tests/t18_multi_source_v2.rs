@@ -299,6 +299,10 @@ fn test_omp_watcher_lock_and_dir_linkage() {
         opencode_db_path: temp.path().join("opencode.db"),
         continue_sessions_root: temp.path().join("continue_sessions"),
         omp_sessions_root: temp.path().join("omp_sessions"),
+        antigravity_conversations_root: temp.path().join("antigravity_conversations"),
+        zcode_root: temp.path().join("zcode"),
+        qoder_root: temp.path().join("qoder"),
+        workbuddy_root: temp.path().join("workbuddy"),
         db_path: temp.path().join("db.sqlite3"),
     };
     let (tx, _rx) = channel();

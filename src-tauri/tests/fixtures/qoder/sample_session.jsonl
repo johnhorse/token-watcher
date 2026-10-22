@@ -1,0 +1,2 @@
+{"type":"assistant","message":{"id":"msg-qoder-01","model":"qwen-2.5-coder-32b","usage":{"input_tokens":1200,"output_tokens":350,"cache_read_input_tokens":800,"cache_creation_input_tokens":0}},"timestamp":"2026-10-22T08:00:00.000Z"}
+{"type":"assistant","message":{"id":"msg-qoder-02","model":"qwen-2.5-coder-32b","usage":{"input_tokens":1500,"output_tokens":400,"cache_read_input_tokens":1100,"cache_creation_input_tokens":100}},"timestamp":"2026-10-22T08:05:00.000Z"}

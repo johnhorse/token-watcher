@@ -22,6 +22,7 @@ fn sample_record(msg_id: &str, ts_ms: i64, tokens: (i64, i64, i64, i64)) -> Usag
         cwd: None,
         cc_version: None,
         duration_ms: None,
+        thoughts_tokens: 0,
     }
 }
 

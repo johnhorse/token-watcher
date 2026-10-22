@@ -42,6 +42,7 @@ fn rec(id: &str, session: &str, ts_ms: i64, input: i64, output: i64) -> UsageRec
         cwd: None,
         cc_version: None,
         duration_ms: None,
+        thoughts_tokens: 0,
     }
 }
 
@@ -126,19 +127,18 @@ fn active_session_selection_uses_latest_record() {
         ])
         .unwrap();
 
-    // A 与 B 都在 5 分钟窗口内；全局最近一条属于 B → 只算 B
+    // 状态栏数字始终展示今日全局汇总数据（口径与 Today 同源，所有并行会话均计入）
     assert_eq!(
         tray_metric_at(&store, TrayMetric::Total, now).unwrap(),
-        5 + 3,
-        "取最近记录所属会话，不把 A 的并行消耗加进来"
+        (10 + 1) + (20 + 2) + (5 + 3) + (7 + 7),
+        "状态栏始终聚合今日全局汇总，并行会话均计入"
     );
-    assert_eq!(tray_metric_at(&store, TrayMetric::Input, now).unwrap(), 5);
-    assert_eq!(tray_metric_at(&store, TrayMetric::Output, now).unwrap(), 3);
+    assert_eq!(tray_metric_at(&store, TrayMetric::Input, now).unwrap(), 10 + 20 + 5 + 7);
+    assert_eq!(tray_metric_at(&store, TrayMetric::Output, now).unwrap(), 1 + 2 + 3 + 7);
     assert_eq!(
         tray_metric_at(&store, TrayMetric::CacheRead, now).unwrap(),
         0
     );
-
     // 会话列表 active 判定与托盘同窗口
     let dashboard = dashboard_at(&store, Range::Today, now).unwrap();
     let flag = |id: &str| {
@@ -367,6 +367,8 @@ fn dashboard_serializes_to_contract_shape() {
             "pulses",
             "range",
             "sessions",
+            "thinking_share",
+            "thoughts_tokens",
             "totals",
         ]
     );
@@ -510,6 +512,7 @@ fn large_fixture_dashboard_stays_fast() {
             cwd: None,
             cc_version: None,
             duration_ms: None,
+            thoughts_tokens: 0,
         })
         .collect();
     store.upsert_records(&records).unwrap();

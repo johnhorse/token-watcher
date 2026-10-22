@@ -148,6 +148,8 @@ pub struct Dashboard {
     pub profiles: Vec<ProfileCard>,
     pub sessions: Vec<SessionRow>,
     pub available_engines: Vec<EngineSlice>,
+    pub thinking_share: Option<f64>,
+    pub thoughts_tokens: i64,
 }
 /// 桌面角落 HUD 紧凑概览数据（< 1ms 轻量查询）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -364,6 +366,25 @@ pub fn dashboard_at_with_prices_and_engine(
         is_complete: unpriced_tokens == 0,
         unpriced_tokens,
     };
+    let engine_clause = sql_engine_where(clean_engine);
+    let thoughts_sql = format!(
+        "SELECT COALESCE(SUM(thoughts_tokens), 0), COALESCE(SUM(output_tokens), 0)
+         FROM usage_records
+         WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2 {engine_clause}"
+    );
+    let (sum_thoughts, sum_output): (i64, i64) = store
+        .conn()
+        .query_row(&thoughts_sql, params![start_ms, end_ms], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap_or((0, 0));
+
+    let thinking_share = if sum_thoughts > 0 && sum_output > 0 {
+        let share = (sum_thoughts as f64) / (sum_output as f64);
+        Some((share * 1000.0).round() / 1000.0)
+    } else {
+        None
+    };
 
     Ok(Dashboard {
         range,
@@ -375,6 +396,8 @@ pub fn dashboard_at_with_prices_and_engine(
         profiles,
         sessions: sessions_between(store, start_ms, end_ms, now_ms, clean_engine)?,
         available_engines,
+        thinking_share,
+        thoughts_tokens: sum_thoughts,
     })
 }
 
@@ -388,6 +411,10 @@ pub fn sql_engine_where(engine: Option<&str>) -> &'static str {
         Some("opencode") => " AND (record_id LIKE 'opencode:%' OR entrypoint = 'opencode')",
         Some("continue") => " AND (record_id LIKE 'continue:%' OR entrypoint = 'continue')",
         Some("omp") => " AND (record_id LIKE 'omp:%' OR entrypoint = 'omp')",
+        Some("antigravity") => " AND (record_id LIKE 'antigravity:%' OR entrypoint = 'antigravity')",
+        Some("zcode") => " AND (record_id LIKE 'zcode:%' OR entrypoint = 'zcode')",
+        Some("qoder") => " AND (record_id LIKE 'qoder:%' OR entrypoint = 'qoder')",
+        Some("workbuddy") => " AND (record_id LIKE 'workbuddy:%' OR entrypoint = 'workbuddy')",
         Some("claude") => {
             " AND NOT (record_id LIKE 'codex:%' OR entrypoint = 'codex' \
                      OR record_id LIKE 'cline:%' OR entrypoint = 'cline' \
@@ -395,7 +422,11 @@ pub fn sql_engine_where(engine: Option<&str>) -> &'static str {
                      OR record_id LIKE 'aider:%' OR entrypoint = 'aider' \
                      OR record_id LIKE 'opencode:%' OR entrypoint = 'opencode' \
                      OR record_id LIKE 'continue:%' OR entrypoint = 'continue' \
-                     OR record_id LIKE 'omp:%' OR entrypoint = 'omp')"
+                     OR record_id LIKE 'omp:%' OR entrypoint = 'omp' \
+                     OR record_id LIKE 'antigravity:%' OR entrypoint = 'antigravity' \
+                     OR record_id LIKE 'zcode:%' OR entrypoint = 'zcode' \
+                     OR record_id LIKE 'qoder:%' OR entrypoint = 'qoder' \
+                     OR record_id LIKE 'workbuddy:%' OR entrypoint = 'workbuddy')"
         }
         _ => "",
     }
@@ -425,6 +456,18 @@ pub fn sql_engine_where_alias(engine: Option<&str>, alias: &str) -> String {
         Some("omp") => {
             format!(" AND ({alias}.record_id LIKE 'omp:%' OR {alias}.entrypoint = 'omp')")
         }
+        Some("antigravity") => {
+            format!(" AND ({alias}.record_id LIKE 'antigravity:%' OR {alias}.entrypoint = 'antigravity')")
+        }
+        Some("zcode") => {
+            format!(" AND ({alias}.record_id LIKE 'zcode:%' OR {alias}.entrypoint = 'zcode')")
+        }
+        Some("qoder") => {
+            format!(" AND ({alias}.record_id LIKE 'qoder:%' OR {alias}.entrypoint = 'qoder')")
+        }
+        Some("workbuddy") => {
+            format!(" AND ({alias}.record_id LIKE 'workbuddy:%' OR {alias}.entrypoint = 'workbuddy')")
+        }
         Some("claude") => {
             format!(
                 " AND NOT ({alias}.record_id LIKE 'codex:%' OR {alias}.entrypoint = 'codex' \
@@ -433,7 +476,11 @@ pub fn sql_engine_where_alias(engine: Option<&str>, alias: &str) -> String {
                          OR {alias}.record_id LIKE 'aider:%' OR {alias}.entrypoint = 'aider' \
                          OR {alias}.record_id LIKE 'opencode:%' OR {alias}.entrypoint = 'opencode' \
                          OR {alias}.record_id LIKE 'continue:%' OR {alias}.entrypoint = 'continue' \
-                         OR {alias}.record_id LIKE 'omp:%' OR {alias}.entrypoint = 'omp')"
+                         OR {alias}.record_id LIKE 'omp:%' OR {alias}.entrypoint = 'omp' \
+                         OR {alias}.record_id LIKE 'antigravity:%' OR {alias}.entrypoint = 'antigravity' \
+                         OR {alias}.record_id LIKE 'zcode:%' OR {alias}.entrypoint = 'zcode' \
+                         OR {alias}.record_id LIKE 'qoder:%' OR {alias}.entrypoint = 'qoder' \
+                         OR {alias}.record_id LIKE 'workbuddy:%' OR {alias}.entrypoint = 'workbuddy')"
             )
         }
         _ => String::new(),
@@ -458,6 +505,10 @@ pub fn available_engines_between(
                    WHEN record_id LIKE 'opencode:%' OR entrypoint = 'opencode' THEN 'opencode'
                    WHEN record_id LIKE 'continue:%' OR entrypoint = 'continue' THEN 'continue'
                    WHEN record_id LIKE 'omp:%' OR entrypoint = 'omp' THEN 'omp'
+                   WHEN record_id LIKE 'antigravity:%' OR entrypoint = 'antigravity' THEN 'antigravity'
+                   WHEN record_id LIKE 'zcode:%' OR entrypoint = 'zcode' THEN 'zcode'
+                   WHEN record_id LIKE 'qoder:%' OR entrypoint = 'qoder' THEN 'qoder'
+                   WHEN record_id LIKE 'workbuddy:%' OR entrypoint = 'workbuddy' THEN 'workbuddy'
                    ELSE 'claude'
                END
                HAVING tokens > 0
@@ -481,42 +532,19 @@ pub fn tray_metric(store: &Store, metric: TrayMetric) -> Result<i64, CoreError> 
     tray_metric_at(store, metric, now_ms())
 }
 
-/// 托盘数字：有活跃会话 → 该会话今日内该指标合计；无 → 今日累计该指标。
-/// 口径与 `dashboard(Today).totals` 同源（SC7）。
+/// 托盘/状态栏数字：始终展示今日全局汇总数据（口径与 `dashboard(Today).totals` 完全同源一致）。
 pub fn tray_metric_at(store: &Store, metric: TrayMetric, now_ms: i64) -> Result<i64, CoreError> {
     let today = local_date_at(store, now_ms)?;
     let (start_ms, end_ms) = store.local_day_bounds(&today)?;
 
-    // 并行多会话：全局最近一条记录所属会话即激活会话（不求和）
-    let latest: Option<(String, i64)> = store
-        .conn()
-        .query_row(
-            "SELECT session_id, timestamp_ms FROM usage_records
-             ORDER BY timestamp_ms DESC, record_id DESC LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-
     if metric == TrayMetric::CacheRate {
-        let (input, cache_read): (i64, i64) = match latest {
-            Some((session_id, ts_ms)) if ts_ms >= now_ms - ACTIVE_WINDOW_MS => {
-                store.conn().query_row(
-                    "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_read_tokens), 0)
-                     FROM usage_records
-                     WHERE session_id = ?1 AND timestamp_ms >= ?2 AND timestamp_ms < ?3",
-                    params![session_id, start_ms, end_ms],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )?
-            }
-            _ => store.conn().query_row(
-                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_read_tokens), 0)
-                     FROM usage_records
-                     WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2",
-                params![start_ms, end_ms],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?,
-        };
+        let (input, cache_read): (i64, i64) = store.conn().query_row(
+            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_read_tokens), 0)
+             FROM usage_records
+             WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2",
+            params![start_ms, end_ms],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
         let denom = input + cache_read;
         return if denom > 0 {
             Ok((cache_read * 100) / denom)
@@ -526,24 +554,14 @@ pub fn tray_metric_at(store: &Store, metric: TrayMetric, now_ms: i64) -> Result<
     }
 
     let expr = metric_expr(metric);
-    let value: i64 = match latest {
-        Some((session_id, ts_ms)) if ts_ms >= now_ms - ACTIVE_WINDOW_MS => store.conn().query_row(
-            &format!(
-                "SELECT COALESCE(SUM({expr}), 0) FROM usage_records
-                     WHERE session_id = ?1 AND timestamp_ms >= ?2 AND timestamp_ms < ?3"
-            ),
-            params![session_id, start_ms, end_ms],
-            |row| row.get(0),
-        )?,
-        _ => store.conn().query_row(
-            &format!(
-                "SELECT COALESCE(SUM({expr}), 0) FROM usage_records
-                 WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2"
-            ),
-            params![start_ms, end_ms],
-            |row| row.get(0),
-        )?,
-    };
+    let value: i64 = store.conn().query_row(
+        &format!(
+            "SELECT COALESCE(SUM({expr}), 0) FROM usage_records
+             WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2"
+        ),
+        params![start_ms, end_ms],
+        |row| row.get(0),
+    )?;
     Ok(value)
 }
 
@@ -1177,6 +1195,14 @@ pub fn detect_engine(record_id: &str, entrypoint: &str) -> &'static str {
         "continue"
     } else if record_id.starts_with("omp:") || entrypoint.starts_with("omp") {
         "omp"
+    } else if record_id.starts_with("antigravity:") || entrypoint.starts_with("antigravity") {
+        "antigravity"
+    } else if record_id.starts_with("zcode:") || entrypoint.starts_with("zcode") {
+        "zcode"
+    } else if record_id.starts_with("qoder:") || entrypoint.starts_with("qoder") {
+        "qoder"
+    } else if record_id.starts_with("workbuddy:") || entrypoint.starts_with("workbuddy") {
+        "workbuddy"
     } else {
         "claude"
     }

@@ -635,7 +635,7 @@ fn migrates_v1_database_forward_to_v3() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
 }
 
 // 10. R2-2 手动额度三列：默认 NULL、整体覆盖、未知档案不命中

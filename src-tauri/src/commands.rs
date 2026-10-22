@@ -44,6 +44,8 @@ fn empty_dashboard(range: Range, engine: Option<String>) -> Dashboard {
         profiles: Vec::new(),
         sessions: Vec::new(),
         available_engines: Vec::new(),
+        thinking_share: None,
+        thoughts_tokens: 0,
     }
 }
 

@@ -57,6 +57,7 @@ fn sample_usage_record(record_id: &str, ts_ms: i64) -> UsageRecord {
         cwd: Some("/test".to_string()),
         cc_version: Some("2.1.303".to_string()),
         duration_ms: None,
+        thoughts_tokens: 0,
     }
 }
 

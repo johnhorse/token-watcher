@@ -229,6 +229,7 @@ fn record(ts_ms: i64) -> UsageRecord {
         cwd: None,
         cc_version: None,
         duration_ms: None,
+        thoughts_tokens: 0,
     }
 }
 
@@ -262,4 +263,39 @@ fn tray_metric_query_matches_selected_metric() {
         tray_metric_at(&store, settings.tray_metric, now).unwrap(),
         200
     );
+}
+
+#[test]
+fn tray_metric_always_shows_today_all_summary_data() {
+    let mut store = Store::open_in_memory().unwrap();
+    let now = agg::now_ms();
+    let today = store.local_today().unwrap();
+    let (start, end) = store.local_day_bounds(&today).unwrap();
+    let ts_active = (now - 60_000).max(start + 1).min(end - 1);
+    let ts_earlier = (now - 3_600_000).max(start + 1).min(end - 1);
+
+    let mut r1 = record(ts_active);
+    r1.record_id = "r1-active".to_string();
+    r1.session_id = "sess-1".to_string();
+    r1.input_tokens = 200;
+    r1.output_tokens = 300;
+    r1.cache_read_tokens = 0;
+    r1.cache_creation_tokens = 0;
+
+    let mut r2 = record(ts_earlier);
+    r2.record_id = "r2-earlier".to_string();
+    r2.session_id = "sess-2".to_string();
+    r2.input_tokens = 1000;
+    r2.output_tokens = 2000;
+    r2.cache_read_tokens = 500;
+    r2.cache_creation_tokens = 0;
+
+    store.upsert_records(&[r1, r2]).unwrap();
+
+    // 无论 sess-1 是否在 5 分钟活跃窗口内，状态栏指标始终为全天会话汇总：
+    // Total = (200 + 300) + (1000 + 2000 + 500) = 4000
+    assert_eq!(tray_metric_at(&store, TrayMetric::Total, now).unwrap(), 4000);
+    assert_eq!(tray_metric_at(&store, TrayMetric::Input, now).unwrap(), 1200);
+    assert_eq!(tray_metric_at(&store, TrayMetric::Output, now).unwrap(), 2300);
+    assert_eq!(tray_metric_at(&store, TrayMetric::CacheRead, now).unwrap(), 500);
 }

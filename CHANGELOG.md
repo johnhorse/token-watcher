@@ -7,6 +7,23 @@
 
 ---
 
+## [0.7.0] - 2026-10-22
+
+### Added
+- **多数据源扩展 3.0（Google Antigravity、智谱 ZCode、阿里 Qoder、腾讯 WorkBuddy）**：
+  - **Google Antigravity**：支持解析本地 SQLite 会话库（`conversations/*.db`），内置零额外依赖 `ProtobufReader` 穿透解码嵌套元数据，精准还原 4D Token、思维链用量与起止耗时，支持并发忙锁独立快照安全降级；
+  - **智谱 ZCode**：解析 `model-io-session_*.jsonl`，严格应用 D24 规则扣除包含式缓存防双计，映射单轮原生毫秒耗时 `durationMs` 与轮次 `attempt`；
+  - **阿里 Qoder 与腾讯 WorkBuddy**：解析官方项目级会话流 JSONL，支持 4D Token、思维链及秒级/毫秒级时间戳自适应规范化；
+  - **基准价目表扩充**：定价表补充 `GLM-5.3`、`gemini-3.8-flash`、`gemini-3.0` 系列模型及 `qwen-2.5-coder-32b`、`hunyuan-code`。
+- **Thinking Iceberg™（思维链冰山模型）**：
+  - 底层存储升级至 Schema v7，`usage_records` 增加 `thoughts_tokens` 持久化列；
+  - 看板新增 Thinking Iceberg 冰山模型卡片，直观透视「水面之上可见输出」与「水面之下深层思考」；
+  - 徽标矩阵拓展至 12 款主流引擎，全链路注册隔离名单，防止新数据源污染 Claude 订阅时间线。
+
+### Fixed
+- **状态栏指标聚合口径纠偏**：
+  - 修复状态栏（菜单栏 / 托盘）在活跃会话期仅显示单会话导致数值跳变的缺陷，始终保持展示今日全天全局汇总数据，与 HUD 活跃会话切片彻底解耦。
+
 ## [0.6.1] - 2026-10-22
 
 ### Added

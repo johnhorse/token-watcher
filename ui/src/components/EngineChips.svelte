@@ -23,6 +23,10 @@
       case "opencode": return "OpenCode";
       case "continue": return "Continue";
       case "omp": return "omp";
+      case "antigravity": return "Antigravity";
+      case "zcode": return "ZCode";
+      case "qoder": return "Qoder";
+      case "workbuddy": return "WorkBuddy";
       default: return "Claude";
     }
   }
@@ -108,6 +112,10 @@
   .dot.opencode { background: #10b981; }
   .dot.continue { background: #06b6d4; }
   .dot.omp { background: #eab308; }
+  .dot.antigravity { background: #c084fc; }
+  .dot.zcode { background: #3b82f6; }
+  .dot.qoder { background: #f97316; }
+  .dot.workbuddy { background: #14b8a6; }
 
   .label {
     letter-spacing: 0.02em;

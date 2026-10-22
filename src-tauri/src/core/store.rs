@@ -21,7 +21,7 @@ use super::parse::UsageRecord;
 use super::CoreError;
 
 /// 当前 schema 版本。加表/改表时递增并在 migrate 里追加版本迁移分支。
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 /// 每条 SQL 事务提交的用量记录条数
 pub const UPSERT_BATCH: usize = 500;
 
@@ -89,8 +89,9 @@ const UPSERT_SQL: &str = r#"
 INSERT INTO usage_records (
     record_id, session_id, timestamp_ms, input_tokens, output_tokens,
     cache_read_tokens, cache_creation_tokens, model, entrypoint,
-    is_sidechain, cwd, cc_version, profile_id, attribution_source, duration_ms
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+    is_sidechain, cwd, cc_version, profile_id, attribution_source, duration_ms,
+    thoughts_tokens
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
 ON CONFLICT(record_id) DO UPDATE SET
     session_id            = excluded.session_id,
     timestamp_ms          = excluded.timestamp_ms,
@@ -104,6 +105,7 @@ ON CONFLICT(record_id) DO UPDATE SET
     cwd                   = excluded.cwd,
     cc_version            = excluded.cc_version,
     duration_ms           = excluded.duration_ms,
+    thoughts_tokens       = excluded.thoughts_tokens,
     profile_id            = CASE
         WHEN usage_records.attribution_source = 'manual' THEN usage_records.profile_id
         WHEN excluded.attribution_source = 'proxy' THEN excluded.profile_id
@@ -423,6 +425,14 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        if version < 7 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(
+                "ALTER TABLE usage_records ADD COLUMN thoughts_tokens INTEGER NOT NULL DEFAULT 0;
+                 PRAGMA user_version = 7;",
+            )?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -468,7 +478,11 @@ impl Store {
                         || r.record_id.starts_with("aider:")
                         || r.record_id.starts_with("omp:")
                         || r.record_id.starts_with("opencode:")
-                        || r.record_id.starts_with("continue:");
+                        || r.record_id.starts_with("continue:")
+                        || r.record_id.starts_with("antigravity:")
+                        || r.record_id.starts_with("zcode:")
+                        || r.record_id.starts_with("qoder:")
+                        || r.record_id.starts_with("workbuddy:");
                     let (profile_id, attr_source) = if let Some(pid) = proxy_id {
                         (Some(pid), "proxy")
                     } else if is_codex {
@@ -494,6 +508,7 @@ impl Store {
                         profile_id,
                         attr_source,
                         r.duration_ms,
+                        r.thoughts_tokens,
                     ])?;
                 }
             }

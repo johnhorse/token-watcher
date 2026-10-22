@@ -71,6 +71,7 @@ fn make_record(
         cwd: Some("/Volumes/Data/projects/token-watcher".to_string()),
         cc_version: Some("1.0.0".to_string()),
         duration_ms: None,
+        thoughts_tokens: 0,
     }
 }
 

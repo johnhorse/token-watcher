@@ -278,7 +278,7 @@ fn test_schema_v5_migration_and_coalesce_reading() {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         // 检查迁移后字段平滑填充：quota_total 继承 quota_manual_total，quota_unit 为 tokens
         let (q_type, q_unit, q_total, q_used) = conn
             .query_row(

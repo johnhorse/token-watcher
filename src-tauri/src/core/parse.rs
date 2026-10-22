@@ -12,10 +12,11 @@
 //! - 模型维度取 `message.model`（不是 `requestedModel`）；
 //! - 未知字段一律忽略，schema 漂移不得 panic。
 
+use std::path::Path;
+
 use super::CoreError;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-
 /// 一条 assistant 用量记录（已做字段映射与校验）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
@@ -33,6 +34,7 @@ pub struct UsageRecord {
     pub cwd: Option<String>,
     pub cc_version: Option<String>,
     pub duration_ms: Option<i64>,
+    pub thoughts_tokens: i64,
 }
 impl UsageRecord {
     pub fn total_tokens(&self) -> i64 {
@@ -146,6 +148,7 @@ pub fn parse_line(line: &[u8]) -> ParsedLine {
             .and_then(Value::as_str)
             .map(str::to_string),
         duration_ms: None,
+        thoughts_tokens: 0,
     })
 }
 
@@ -496,6 +499,13 @@ pub fn parse_codex_line(line: &[u8], state: &mut CodexFileState) -> ParsedLine {
                 .unwrap_or_else(|| "codex".to_string());
             let cwd = state.cwd.clone();
             let cc_version = state.cli_version.clone();
+            let thoughts = token_value(
+                usage
+                    .get("completion_tokens_details")
+                    .or_else(|| usage.get("output_tokens_details"))
+                    .and_then(|d| d.get("reasoning_tokens")),
+            )
+            .unwrap_or(0);
 
             ParsedLine::Record(UsageRecord {
                 record_id,
@@ -511,6 +521,7 @@ pub fn parse_codex_line(line: &[u8], state: &mut CodexFileState) -> ParsedLine {
                 cwd,
                 cc_version,
                 duration_ms: None,
+                thoughts_tokens: thoughts,
             })
         }
         _ => ParsedLine::Ignored,
@@ -682,6 +693,7 @@ pub fn parse_cline_roo_entries(
             cwd: None,
             cc_version: None,
             duration_ms: None,
+            thoughts_tokens: 0,
         });
     }
 
@@ -782,6 +794,7 @@ pub fn parse_aider_line(line: &[u8], tracker: &mut AiderSessionTracker) -> Parse
         cwd: None,
         cc_version: None,
         duration_ms: None,
+        thoughts_tokens: 0,
     })
 }
 /// 解析 omp 的项目 JSONL 会话单行
@@ -853,6 +866,7 @@ pub fn parse_omp_line(line: &[u8], session_id: &str, cwd: Option<&str>) -> Parse
         cwd: cwd.map(str::to_string),
         cc_version: None,
         duration_ms: None,
+        thoughts_tokens: 0,
     })
 }
 /// 解析 OpenCode 消息表的一行记录
@@ -925,6 +939,7 @@ pub fn parse_opencode_message(
         cwd,
         cc_version: None,
         duration_ms,
+        thoughts_tokens: 0,
     })
 }
 /// 解析 Continue.dev 会话 JSON 记录
@@ -1014,10 +1029,628 @@ pub fn parse_continue_session(
             cwd: None,
             cc_version: None,
             duration_ms: None,
+            thoughts_tokens: 0,
         });
     }
 
     Ok(records)
+}
+
+/// 轻量级无额外依赖 Protobuf Wire-Format 解码器
+pub struct ProtobufReader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum WireValue<'a> {
+    Varint(u64),
+    Bit64(&'a [u8]),
+    LengthDelimited(&'a [u8]),
+    Bit32(&'a [u8]),
+}
+
+impl<'a> ProtobufReader<'a> {
+    pub fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    pub fn next_field(&mut self) -> Option<(u32, WireValue<'a>)> {
+        if self.pos >= self.buf.len() {
+            return None;
+        }
+        let key = self.read_varint()?;
+        let field_num = (key >> 3) as u32;
+        let wire_type = (key & 0x7) as u8;
+
+        let val = match wire_type {
+            0 => {
+                let v = self.read_varint()?;
+                WireValue::Varint(v)
+            }
+            1 => {
+                if 8 > self.buf.len().saturating_sub(self.pos) {
+                    return None;
+                }
+                let bytes = &self.buf[self.pos..self.pos + 8];
+                self.pos += 8;
+                WireValue::Bit64(bytes)
+            }
+            2 => {
+                let len = self.read_varint()? as usize;
+                if len > self.buf.len().saturating_sub(self.pos) {
+                    return None;
+                }
+                let bytes = &self.buf[self.pos..self.pos + len];
+                self.pos += len;
+                WireValue::LengthDelimited(bytes)
+            }
+            5 => {
+                if 4 > self.buf.len().saturating_sub(self.pos) {
+                    return None;
+                }
+                let bytes = &self.buf[self.pos..self.pos + 4];
+                self.pos += 4;
+                WireValue::Bit32(bytes)
+            }
+            _ => return None,
+        };
+        Some((field_num, val))
+    }
+
+    fn read_varint(&mut self) -> Option<u64> {
+        let mut result: u64 = 0;
+        let mut shift = 0;
+        while self.pos < self.buf.len() {
+            let b = self.buf[self.pos];
+            self.pos += 1;
+            result |= ((b & 0x7F) as u64) << shift;
+            if (b & 0x80) == 0 {
+                return Some(result);
+            }
+            shift += 7;
+            if shift > 64 {
+                return None;
+            }
+        }
+        None
+    }
+}
+
+fn read_antigravity_records_from_conn(
+    conn: &rusqlite::Connection,
+    db_path: &Path,
+    previous_idx: i64,
+) -> Result<(Vec<UsageRecord>, i64), CoreError> {
+    let trajectory_id: String = conn
+        .query_row("SELECT trajectory_id FROM trajectory_meta LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or_else(|_| {
+            let stem = db_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("conv");
+            let hash = hash_prefix_8(db_path.to_string_lossy().as_bytes());
+            format!("{stem}_{hash}")
+        });
+
+    let mut stmt = conn.prepare(
+        "SELECT g.idx, g.data, s.metadata \
+         FROM gen_metadata g \
+         LEFT JOIN steps s ON g.idx = s.idx \
+         WHERE g.idx > ?1 \
+         ORDER BY g.idx ASC",
+    )?;
+
+    let mut rows = stmt.query(rusqlite::params![previous_idx])?;
+    let mut records = Vec::new();
+    let mut max_idx = previous_idx;
+    while let Ok(Some(row)) = rows.next() {
+        let g_idx: i64 = row.get(0).unwrap_or(0);
+        let g_data: Vec<u8> = row.get(1).unwrap_or_default();
+        let s_metadata: Option<Vec<u8>> = row.get(2).ok();
+
+        if g_idx > max_idx {
+            max_idx = g_idx;
+        }
+
+        // 解析 g_data 中的嵌套 Protobuf: Field 1 (response) -> Field 4 (usage) & Field 19 (model)
+        let mut top_reader = ProtobufReader::new(&g_data);
+        let mut f1_bytes: Option<&[u8]> = None;
+        while let Some((f_num, val)) = top_reader.next_field() {
+            if f_num == 1 {
+                if let WireValue::LengthDelimited(b) = val {
+                    f1_bytes = Some(b);
+                    break;
+                }
+            }
+        }
+
+        let mut prompt = 0;
+        let mut candidates = 0;
+        let mut cached = 0;
+        let mut thoughts = 0;
+        let mut model = "gemini-3.8-flash".to_string();
+
+        if let Some(f1) = f1_bytes {
+            let mut f1_reader = ProtobufReader::new(f1);
+            while let Some((f1_num, f1_val)) = f1_reader.next_field() {
+                if f1_num == 19 {
+                    if let WireValue::LengthDelimited(b) = f1_val {
+                        if let Ok(s) = std::str::from_utf8(b) {
+                            if !s.is_empty() {
+                                model = s.to_string();
+                            }
+                        }
+                    }
+                } else if f1_num == 4 {
+                    if let WireValue::LengthDelimited(f4_bytes) = f1_val {
+                        let mut f4_reader = ProtobufReader::new(f4_bytes);
+                        while let Some((f4_num, f4_val)) = f4_reader.next_field() {
+                            match (f4_num, f4_val) {
+                                (2, WireValue::Varint(v)) => prompt = v as i64,
+                                (3, WireValue::Varint(v)) => candidates = v as i64,
+                                (5, WireValue::Varint(v)) => cached = v as i64,
+                                (9, WireValue::Varint(v)) => thoughts = v as i64,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 解析 s_metadata 时间戳与耗时: Field 1 (Timestamp: sec, nanos), Field 8 (End Timestamp)
+        let mut timestamp_ms = 0;
+        let mut duration_ms = None;
+        if let Some(meta) = &s_metadata {
+            let mut meta_reader = ProtobufReader::new(meta);
+            let mut f1_ts_bytes: Option<&[u8]> = None;
+            let mut f8_ts_bytes: Option<&[u8]> = None;
+            while let Some((m_num, m_val)) = meta_reader.next_field() {
+                if m_num == 1 {
+                    if let WireValue::LengthDelimited(b) = m_val {
+                        f1_ts_bytes = Some(b);
+                    }
+                } else if m_num == 8 {
+                    if let WireValue::LengthDelimited(b) = m_val {
+                        f8_ts_bytes = Some(b);
+                    }
+                }
+            }
+
+            if let Some(ts_b) = f1_ts_bytes {
+                let mut ts_reader = ProtobufReader::new(ts_b);
+                let mut sec = 0i64;
+                let mut nanos = 0i64;
+                while let Some((t_num, t_val)) = ts_reader.next_field() {
+                    match (t_num, t_val) {
+                        (1, WireValue::Varint(v)) => sec = v as i64,
+                        (2, WireValue::Varint(v)) => nanos = v as i64,
+                        _ => {}
+                    }
+                }
+                if sec > 0 {
+                    timestamp_ms = sec * 1000 + nanos / 1_000_000;
+                }
+            }
+
+            if let (Some(_), Some(end_b)) = (f1_ts_bytes, f8_ts_bytes) {
+                let mut end_reader = ProtobufReader::new(end_b);
+                let mut end_sec = 0i64;
+                let mut end_nanos = 0i64;
+                while let Some((e_num, e_val)) = end_reader.next_field() {
+                    match (e_num, e_val) {
+                        (1, WireValue::Varint(v)) => end_sec = v as i64,
+                        (2, WireValue::Varint(v)) => end_nanos = v as i64,
+                        _ => {}
+                    }
+                }
+                if end_sec > 0 {
+                    let end_ms = end_sec * 1000 + end_nanos / 1_000_000;
+                    if end_ms >= timestamp_ms && timestamp_ms > 0 {
+                        duration_ms = Some(end_ms - timestamp_ms);
+                    }
+                }
+            }
+        }
+
+        if timestamp_ms == 0 {
+            timestamp_ms = std::fs::metadata(db_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+        }
+
+        let record_id = format!("antigravity:{}:{}", trajectory_id, g_idx);
+        let session_id = format!("antigravity:{}", trajectory_id);
+
+        records.push(UsageRecord {
+            record_id,
+            session_id,
+            timestamp_ms,
+            input_tokens: prompt,
+            output_tokens: candidates,
+            cache_read_tokens: cached,
+            cache_creation_tokens: 0,
+            model,
+            entrypoint: "antigravity".to_string(),
+            is_sidechain: false,
+            cwd: None,
+            cc_version: None,
+            duration_ms,
+            thoughts_tokens: thoughts,
+        });
+        }
+        Ok((records, max_idx))
+}
+
+/// 解析 Google Antigravity 的 SQLite 对话库
+pub fn parse_antigravity_db(
+    db_path: &Path,
+    previous_idx: i64,
+) -> Result<(Vec<UsageRecord>, i64), CoreError> {
+    // 1. 优先尝试直接只读连接读取 (PRAGMA query_only = ON; busy_timeout = 500ms)
+    if let Ok(conn) = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    ) {
+        let _ = conn.execute_batch("PRAGMA query_only = ON; PRAGMA busy_timeout = 500;");
+        if let Ok(res) = read_antigravity_records_from_conn(&conn, db_path, previous_idx) {
+            return Ok(res);
+        }
+    }
+
+    // 2. 直读失败（被排他锁锁定/权限不足/缺少 -shm 等）时，安全降级至 copy_and_read 独立快照
+    let temp_dir = std::env::temp_dir().join("token_watcher_antigravity_snap");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let snap_file = temp_dir.join(format!("snap_{}_{}.db", std::process::id(), nonce));
+    if std::fs::copy(db_path, &snap_file).is_err() {
+        return Ok((Vec::new(), previous_idx));
+    }
+    let wal_src = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
+    let wal_dst = std::path::PathBuf::from(format!("{}-wal", snap_file.display()));
+    if wal_src.is_file() {
+        let _ = std::fs::copy(&wal_src, &wal_dst);
+    }
+    let shm_src = std::path::PathBuf::from(format!("{}-shm", db_path.display()));
+    let shm_dst = std::path::PathBuf::from(format!("{}-shm", snap_file.display()));
+    if shm_src.is_file() {
+        let _ = std::fs::copy(&shm_src, &shm_dst);
+    }
+
+    let snap_res = if let Ok(snap_conn) = rusqlite::Connection::open_with_flags(
+        &snap_file,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        let _ = snap_conn.execute_batch("PRAGMA query_only = ON; PRAGMA busy_timeout = 3000;");
+        read_antigravity_records_from_conn(&snap_conn, db_path, previous_idx)
+    } else {
+        Ok((Vec::new(), previous_idx))
+    };
+
+    let _ = std::fs::remove_file(&snap_file);
+    let _ = std::fs::remove_file(&wal_dst);
+    let _ = std::fs::remove_file(&shm_dst);
+
+    snap_res
+}
+
+/// 解析智谱 ZCode CLI / 桌面端 JSONL 行
+pub fn parse_zcode_line(line: &[u8], default_session_id: &str) -> ParsedLine {
+    let line = trim_bytes(line);
+    if line.is_empty() {
+        return ParsedLine::Ignored;
+    }
+    let value: Value = match serde_json::from_slice(line) {
+        Ok(v) => v,
+        Err(_) => return ParsedLine::Bad,
+    };
+    let Some(obj) = value.as_object() else {
+        return ParsedLine::Bad;
+    };
+
+    let Some(response) = obj.get("response").and_then(Value::as_object) else {
+        return ParsedLine::Ignored;
+    };
+    let Some(usage) = response.get("usage").and_then(Value::as_object) else {
+        return ParsedLine::Ignored;
+    };
+
+    let input_tokens = usage.get("inputTokens").and_then(Value::as_i64);
+    let output_tokens = usage.get("outputTokens").and_then(Value::as_i64);
+    let (Some(input_tokens), Some(output_tokens)) = (input_tokens, output_tokens) else {
+        return ParsedLine::Bad;
+    };
+
+    let cache_read = usage.get("cacheReadTokens").and_then(Value::as_i64).unwrap_or(0);
+    let cache_write = usage.get("cacheWriteTokens").and_then(Value::as_i64).unwrap_or(0);
+
+    // D24 防双计：扣减包含式缓存，结合 saturating_sub 与 max(0) 防下溢
+    let net_input = input_tokens
+        .saturating_sub(cache_read.saturating_add(cache_write))
+        .max(0);
+
+    let thoughts_tokens = token_value(
+        usage
+            .get("completion_tokens_details")
+            .or_else(|| usage.get("output_tokens_details"))
+            .and_then(|d| d.get("reasoning_tokens")),
+    )
+    .or_else(|| token_value(usage.get("reasoning_tokens")))
+    .unwrap_or(0);
+
+    let duration_ms = obj.get("durationMs").and_then(Value::as_i64);
+
+    let attempt = obj.get("attempt").and_then(Value::as_i64).unwrap_or(1);
+
+    let session_id = obj
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| obj.get("turnId").and_then(Value::as_str))
+        .unwrap_or(default_session_id);
+    let req_id = obj
+        .get("requestId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+
+    let timestamp_ms = obj
+        .get("completedAt")
+        .or_else(|| obj.get("startedAt"))
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp_ms)
+        .unwrap_or(0);
+
+    let record_id = if !req_id.is_empty() {
+        format!("zcode:{}:{}:{}", session_id, req_id, attempt)
+    } else {
+        format!("zcode:{}:{}:{}", session_id, timestamp_ms, hash_prefix_8(line))
+    };
+
+    let model = obj
+        .get("model")
+        .and_then(|m| {
+            if let Some(m_obj) = m.as_object() {
+                m_obj.get("modelId").and_then(Value::as_str).map(str::to_string)
+            } else {
+                m.as_str().map(str::to_string)
+            }
+        })
+        .unwrap_or_else(|| "GLM-5.3".to_string());
+
+    ParsedLine::Record(UsageRecord {
+        record_id,
+        session_id: session_id.to_string(),
+        timestamp_ms,
+        input_tokens: net_input,
+        output_tokens,
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_write,
+        model,
+        entrypoint: "zcode".to_string(),
+        is_sidechain: false,
+        cwd: None,
+        cc_version: None,
+        duration_ms,
+        thoughts_tokens,
+    })
+}
+
+/// 解析阿里 Qoder JSONL 行
+pub fn parse_qoder_line(line: &[u8], default_session_id: &str) -> ParsedLine {
+    let line = trim_bytes(line);
+    if line.is_empty() {
+        return ParsedLine::Ignored;
+    }
+    let value: Value = match serde_json::from_slice(line) {
+        Ok(v) => v,
+        Err(_) => return ParsedLine::Bad,
+    };
+    let Some(obj) = value.as_object() else {
+        return ParsedLine::Bad;
+    };
+
+    let msg_type = obj.get("type").and_then(Value::as_str).unwrap_or_default();
+    if msg_type != "assistant" {
+        return ParsedLine::Ignored;
+    }
+
+    let Some(message) = obj.get("message").and_then(Value::as_object) else {
+        return ParsedLine::Ignored;
+    };
+    let Some(usage) = message.get("usage").and_then(Value::as_object) else {
+        return ParsedLine::Ignored;
+    };
+
+    let input_tokens = usage.get("input_tokens").and_then(Value::as_i64);
+    let output_tokens = usage.get("output_tokens").and_then(Value::as_i64);
+    let (Some(input_tokens), Some(output_tokens)) = (input_tokens, output_tokens) else {
+        return ParsedLine::Bad;
+    };
+    let cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+
+    let thoughts_tokens = token_value(
+        usage
+            .get("completion_tokens_details")
+            .or_else(|| usage.get("output_tokens_details"))
+            .and_then(|d| d.get("reasoning_tokens")),
+    )
+    .or_else(|| token_value(usage.get("reasoning_tokens")))
+    .unwrap_or(0);
+
+    let msg_id = message
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| "");
+
+    let session_id = obj
+        .get("session_id")
+        .or_else(|| obj.get("sessionId"))
+        .and_then(Value::as_str)
+        .unwrap_or(default_session_id);
+
+    let timestamp_ms = obj
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp_ms)
+        .unwrap_or(0);
+
+    let record_id = if !msg_id.is_empty() {
+        format!("qoder:{}:{}", session_id, msg_id)
+    } else {
+        format!("qoder:{}:{}:{}", session_id, timestamp_ms, hash_prefix_8(line))
+    };
+
+    let model = message
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("qwen-2.5-coder-32b")
+        .to_string();
+
+    ParsedLine::Record(UsageRecord {
+        record_id,
+        session_id: session_id.to_string(),
+        timestamp_ms,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_creation,
+        model,
+        entrypoint: "qoder".to_string(),
+        is_sidechain: false,
+        cwd: None,
+        cc_version: None,
+        duration_ms: None,
+        thoughts_tokens,
+    })
+}
+
+/// 解析腾讯 WorkBuddy / CodeBuddy JSONL 行
+pub fn parse_workbuddy_line(line: &[u8], default_session_id: &str) -> ParsedLine {
+    let line = trim_bytes(line);
+    if line.is_empty() {
+        return ParsedLine::Ignored;
+    }
+    let value: Value = match serde_json::from_slice(line) {
+        Ok(v) => v,
+        Err(_) => return ParsedLine::Bad,
+    };
+    let Some(obj) = value.as_object() else {
+        return ParsedLine::Bad;
+    };
+
+    let msg_type = obj.get("type").and_then(Value::as_str).unwrap_or_default();
+    if msg_type != "assistant" {
+        return ParsedLine::Ignored;
+    }
+
+    let Some(usage) = obj.get("usage").and_then(Value::as_object) else {
+        return ParsedLine::Ignored;
+    };
+
+    let input_tokens = usage.get("input_tokens").and_then(Value::as_i64);
+    let output_tokens = usage.get("output_tokens").and_then(Value::as_i64);
+    let (Some(input_tokens), Some(output_tokens)) = (input_tokens, output_tokens) else {
+        return ParsedLine::Bad;
+    };
+    let cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+
+    let thoughts_tokens = token_value(
+        usage
+            .get("completion_tokens_details")
+            .or_else(|| usage.get("output_tokens_details"))
+            .and_then(|d| d.get("reasoning_tokens")),
+    )
+    .or_else(|| token_value(usage.get("reasoning_tokens")))
+    .unwrap_or(0);
+
+    let msg_id = obj
+        .get("message_id")
+        .or_else(|| obj.get("messageId"))
+        .or_else(|| obj.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| "");
+
+    let session_id = obj
+        .get("session_id")
+        .or_else(|| obj.get("sessionId"))
+        .and_then(Value::as_str)
+        .unwrap_or(default_session_id);
+
+    let timestamp_ms = obj
+        .get("created_at")
+        .or_else(|| obj.get("createdAt"))
+        .and_then(|v| {
+            if let Some(n) = v.as_i64() {
+                if n < 10_000_000_000 {
+                    Some(n * 1000)
+                } else {
+                    Some(n)
+                }
+            } else if let Some(s) = v.as_str() {
+                parse_timestamp_ms(s)
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            obj.get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(parse_timestamp_ms)
+        })
+        .unwrap_or(0);
+
+    let record_id = if !msg_id.is_empty() {
+        format!("workbuddy:{}:{}", session_id, msg_id)
+    } else {
+        format!("workbuddy:{}:{}:{}", session_id, timestamp_ms, hash_prefix_8(line))
+    };
+
+    let model = obj
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("hunyuan-code")
+        .to_string();
+
+    ParsedLine::Record(UsageRecord {
+        record_id,
+        session_id: session_id.to_string(),
+        timestamp_ms,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_creation,
+        model,
+        entrypoint: "workbuddy".to_string(),
+        is_sidechain: false,
+        cwd: None,
+        cc_version: None,
+        duration_ms: None,
+        thoughts_tokens,
+    })
 }
 
 #[cfg(test)]
@@ -1617,5 +2250,121 @@ mod tests {
         assert_eq!(r1.model, "gpt-5.2");
         assert_eq!(r1.entrypoint, "aider");
         assert_eq!(r3.model, "gemini-3-flash");
+    }
+
+    #[test]
+    fn test_protobuf_reader_varint_and_delimited() {
+        // Field 1 (varint 150), Field 2 (string "hello")
+        let buf = [0x08, 0x96, 0x01, 0x12, 0x05, b'h', b'e', b'l', b'l', b'o'];
+        let mut reader = ProtobufReader::new(&buf);
+        let (f1, v1) = reader.next_field().unwrap();
+        assert_eq!(f1, 1);
+        assert_eq!(v1, WireValue::Varint(150));
+        let (f2, v2) = reader.next_field().unwrap();
+        assert_eq!(f2, 2);
+        assert_eq!(v2, WireValue::LengthDelimited(b"hello"));
+        assert!(reader.next_field().is_none());
+    }
+
+    #[test]
+    fn test_protobuf_reader_huge_length_no_overflow_panic() {
+        // Wire type 2 with length varint near u64::MAX
+        let buf = [0x12, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x01];
+        let mut reader = ProtobufReader::new(&buf);
+        assert_eq!(reader.next_field(), None);
+    }
+
+    #[test]
+    fn test_parse_antigravity_fixture() {
+        let fixture_path = Path::new("tests/fixtures/antigravity/sample_conversation.db");
+        if !fixture_path.exists() {
+            return;
+        }
+        let (records, max_idx) = parse_antigravity_db(fixture_path, -1).unwrap();
+        assert_eq!(records.len(), 5);
+        assert_eq!(max_idx, 4);
+
+        // 验证 Record 0
+        let r0 = &records[0];
+        assert_eq!(r0.record_id, "antigravity:f269529e-e7aa-462e-8d46-f83d3b9d6f31:0");
+        assert_eq!(r0.input_tokens, 22985);
+        assert_eq!(r0.output_tokens, 522);
+        assert_eq!(r0.thoughts_tokens, 463);
+        assert_eq!(r0.cache_read_tokens, 0);
+        assert_eq!(r0.model, "gemini-3.8-flash");
+        assert_eq!(r0.timestamp_ms, 1789717583428);
+
+        // 验证 Record 2 (带缓存与耗时)
+        let r2 = &records[2];
+        assert_eq!(r2.input_tokens, 5621);
+        assert_eq!(r2.output_tokens, 93);
+        assert_eq!(r2.thoughts_tokens, 45);
+        assert_eq!(r2.cache_read_tokens, 20370);
+        assert_eq!(r2.duration_ms, Some(24617));
+    }
+
+    #[test]
+    fn test_parse_zcode_fixture() {
+        let fixture_path = Path::new("tests/fixtures/zcode/model-io-session_sample.jsonl");
+        if !fixture_path.exists() {
+            return;
+        }
+        let content = std::fs::read_to_string(fixture_path).unwrap();
+        let first_line = content.lines().next().unwrap();
+        let record = match parse_zcode_line(first_line.as_bytes(), "test-sess") {
+            ParsedLine::Record(r) => r,
+            other => panic!("预期 Record，实际: {:?}", other),
+        };
+
+        // CP-2: net_input = 35839 - 23104 = 12735
+        assert_eq!(record.input_tokens, 12735);
+        assert_eq!(record.output_tokens, 178);
+        assert_eq!(record.cache_read_tokens, 23104);
+        assert_eq!(record.duration_ms, Some(11140));
+        assert_eq!(record.model, "GLM-5.3");
+        assert_eq!(record.entrypoint, "zcode");
+    }
+
+    #[test]
+    fn test_parse_qoder_fixture() {
+        let fixture_path = Path::new("tests/fixtures/qoder/sample_session.jsonl");
+        if !fixture_path.exists() {
+            return;
+        }
+        let content = std::fs::read_to_string(fixture_path).unwrap();
+        let first_line = content.lines().next().unwrap();
+        let record = match parse_qoder_line(first_line.as_bytes(), "sess-qoder") {
+            ParsedLine::Record(r) => r,
+            other => panic!("预期 Record，实际: {:?}", other),
+        };
+
+        assert_eq!(record.record_id, "qoder:sess-qoder:msg-qoder-01");
+        assert_eq!(record.input_tokens, 1200);
+        assert_eq!(record.output_tokens, 350);
+        assert_eq!(record.cache_read_tokens, 800);
+        assert_eq!(record.model, "qwen-2.5-coder-32b");
+        assert_eq!(record.entrypoint, "qoder");
+    }
+
+    #[test]
+    fn test_parse_workbuddy_fixture() {
+        let fixture_path = Path::new("tests/fixtures/workbuddy/sample_session.jsonl");
+        if !fixture_path.exists() {
+            return;
+        }
+        let content = std::fs::read_to_string(fixture_path).unwrap();
+        let first_line = content.lines().next().unwrap();
+        let record = match parse_workbuddy_line(first_line.as_bytes(), "sess-wb") {
+            ParsedLine::Record(r) => r,
+            other => panic!("预期 Record，实际: {:?}", other),
+        };
+
+        assert_eq!(record.record_id, "workbuddy:sess-wb:wb-msg-01");
+        assert_eq!(record.input_tokens, 1000);
+        assert_eq!(record.output_tokens, 250);
+        assert_eq!(record.cache_read_tokens, 600);
+        assert_eq!(record.model, "hunyuan-code");
+        assert_eq!(record.entrypoint, "workbuddy");
+        assert_eq!(record.timestamp_ms, 1792640000000);
     }
 }

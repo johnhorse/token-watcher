@@ -151,6 +151,8 @@ export interface Dashboard {
   profiles: ProfileCard[];
   sessions: SessionRow[];
   available_engines?: EngineSlice[];
+  thinking_share?: number | null;
+  thoughts_tokens?: number;
 }
 
 export interface ScanStatus {

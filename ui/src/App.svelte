@@ -24,7 +24,7 @@
   import ProxyBar from "./components/ProxyBar.svelte";
   import FlightRecorder from "./components/FlightRecorder.svelte";
   import EngineChips from "./components/EngineChips.svelte";
-
+  import ThinkingCard from "./components/ThinkingCard.svelte";
   const adapter: UiAdapter = createAdapter();
 
   const TOTAL_LABEL: Record<Range, MessageKey> = {
@@ -432,6 +432,11 @@
         </div>
       </section>
 
+      <ThinkingCard
+        thinkingShare={dashboard.thinking_share}
+        thoughtsTokens={dashboard.thoughts_tokens}
+        outputTokens={dashboard.totals.output}
+      />
       <RangeChips value={range} onchange={setRange} />
       <EngineChips
         selectedEngine={selectedEngine}

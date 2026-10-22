@@ -68,6 +68,7 @@ fn make_record(
         cwd: Some("/test".to_string()),
         cc_version: None,
         duration_ms: None,
+        thoughts_tokens: 0,
     }
 }
 

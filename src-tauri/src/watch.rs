@@ -55,6 +55,10 @@ pub struct DataPaths {
     pub opencode_db_path: PathBuf,
     pub continue_sessions_root: PathBuf,
     pub omp_sessions_root: PathBuf,
+    pub antigravity_conversations_root: PathBuf,
+    pub zcode_root: PathBuf,
+    pub qoder_root: PathBuf,
+    pub workbuddy_root: PathBuf,
     pub db_path: PathBuf,
 }
 
@@ -115,6 +119,10 @@ impl DataPaths {
             opencode_db_path,
             continue_sessions_root,
             omp_sessions_root,
+            antigravity_conversations_root: home.join(".gemini/antigravity/conversations"),
+            zcode_root: home.join(".zcode"),
+            qoder_root: home.join(".qoder"),
+            workbuddy_root: home.join(".codebuddy"),
             db_path: home.join(".token-watcher").join("db.sqlite3"),
         })
     }
@@ -135,6 +143,10 @@ impl DataPaths {
             opencode_db_path: temp.join("opencode.db"),
             continue_sessions_root: temp.join("continue_sessions"),
             omp_sessions_root: temp.join("omp_sessions"),
+            antigravity_conversations_root: temp.join("antigravity_conversations"),
+            zcode_root: temp.join("zcode"),
+            qoder_root: temp.join("qoder"),
+            workbuddy_root: temp.join("workbuddy"),
             db_path: temp.join("db.sqlite3"),
         }
     }
@@ -493,6 +505,18 @@ impl<S: EventSink> DataEngine<S> {
                     Err(e) => eprintln!("[token-watcher] 监听 {} 失败: {e}", target.display()),
                 }
             }
+            if paths.antigravity_conversations_root.exists() {
+                let _ = w.watch(&paths.antigravity_conversations_root, RecursiveMode::Recursive);
+            }
+            if paths.zcode_root.exists() {
+                let _ = w.watch(&paths.zcode_root, RecursiveMode::Recursive);
+            }
+            if paths.qoder_root.exists() {
+                let _ = w.watch(&paths.qoder_root, RecursiveMode::Recursive);
+            }
+            if paths.workbuddy_root.exists() {
+                let _ = w.watch(&paths.workbuddy_root, RecursiveMode::Recursive);
+            }
         }
 
         let (store, health) = match Store::open(&paths.db_path) {
@@ -613,6 +637,10 @@ impl<S: EventSink> DataEngine<S> {
             &self.paths.roo_tasks_root,
             &self.paths.continue_sessions_root,
             &self.paths.omp_sessions_root,
+            &self.paths.antigravity_conversations_root,
+            &self.paths.zcode_root,
+            &self.paths.qoder_root,
+            &self.paths.workbuddy_root,
         ]
         .into_iter()
         .filter(|p| p.exists())
@@ -909,6 +937,12 @@ impl<S: EventSink> DataEngine<S> {
                 {
                     self.pending_files
                         .insert(self.paths.opencode_db_path.clone());
+                } else if self.under_antigravity(path) && path.to_string_lossy().ends_with(".db-wal") {
+                    let db_str = path.to_string_lossy().trim_end_matches("-wal").to_string();
+                    let db_path = std::path::PathBuf::from(db_str);
+                    if db_path.is_file() {
+                        self.pending_files.insert(db_path);
+                    }
                 } else {
                     self.pending_files.insert(path.clone());
                 }
@@ -1084,6 +1118,45 @@ impl<S: EventSink> DataEngine<S> {
             _ => false,
         }
     }
+    fn under_zcode(&self, path: &Path) -> bool {
+        match (
+            fs::canonicalize(&self.paths.zcode_root).ok(),
+            fs::canonicalize(path),
+        ) {
+            (Some(root), Ok(canonical)) => canonical.starts_with(root),
+            _ => path.starts_with(&self.paths.zcode_root),
+        }
+    }
+
+    fn under_qoder(&self, path: &Path) -> bool {
+        match (
+            fs::canonicalize(&self.paths.qoder_root).ok(),
+            fs::canonicalize(path),
+        ) {
+            (Some(root), Ok(canonical)) => canonical.starts_with(root),
+            _ => path.starts_with(&self.paths.qoder_root),
+        }
+    }
+
+    fn under_workbuddy(&self, path: &Path) -> bool {
+        match (
+            fs::canonicalize(&self.paths.workbuddy_root).ok(),
+            fs::canonicalize(path),
+        ) {
+            (Some(root), Ok(canonical)) => canonical.starts_with(root),
+            _ => path.starts_with(&self.paths.workbuddy_root),
+        }
+    }
+
+    fn under_antigravity(&self, path: &Path) -> bool {
+        match (
+            fs::canonicalize(&self.paths.antigravity_conversations_root).ok(),
+            fs::canonicalize(path),
+        ) {
+            (Some(root), Ok(canonical)) => canonical.starts_with(root),
+            _ => path.starts_with(&self.paths.antigravity_conversations_root),
+        }
+    }
 
     fn is_source_event(&self, path: &Path) -> bool {
         let is_jsonl = path.extension().and_then(|e| e.to_str()) == Some("jsonl");
@@ -1093,14 +1166,22 @@ impl<S: EventSink> DataEngine<S> {
         let is_opencode = path == self.paths.opencode_db_path
             || path.file_name().and_then(|n| n.to_str()) == Some("opencode.db")
             || path.file_name().and_then(|n| n.to_str()) == Some("opencode.db-wal");
+        let is_antigravity = self.under_antigravity(path)
+            && (path.extension().and_then(|e| e.to_str()) == Some("db")
+                || path.to_string_lossy().ends_with(".db-wal"));
+
         (is_jsonl
             && (self.under_projects(path)
                 || self.under_codex(path)
                 || self.under_omp(path)
+                || self.under_zcode(path)
+                || self.under_qoder(path)
+                || self.under_workbuddy(path)
                 || path == self.paths.aider_analytics_path))
             || (is_ui_messages && (self.under_cline(path) || self.under_roo(path)))
             || is_continue
             || is_opencode
+            || is_antigravity
     }
 
     fn is_projects_root(&self, path: &Path) -> bool {
@@ -1193,6 +1274,20 @@ impl<S: EventSink> DataEngine<S> {
                 for entry in entries.flatten() {
                     let p = entry.path();
                     if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("json") {
+                        self.pending_files.insert(p);
+                        found = true;
+                    }
+                }
+            }
+        } else if self.under_zcode(path) || self.under_qoder(path) || self.under_workbuddy(path) {
+            let before = self.pending_files.len();
+            collect_jsonl_recursive(path, 3, &mut self.pending_files);
+            found = self.pending_files.len() > before;
+        } else if self.under_antigravity(path) {
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("db") {
                         self.pending_files.insert(p);
                         found = true;
                     }
@@ -1453,6 +1548,10 @@ impl<S: EventSink> DataEngine<S> {
             &self.paths.roo_tasks_root,
             &self.paths.continue_sessions_root,
             &self.paths.omp_sessions_root,
+            &self.paths.antigravity_conversations_root,
+            &self.paths.zcode_root,
+            &self.paths.qoder_root,
+            &self.paths.workbuddy_root,
         ]
         .into_iter()
         .filter(|p| p.exists())

@@ -22,6 +22,10 @@
       case "opencode": return "OpenCode";
       case "continue": return "Continue";
       case "omp": return "omp";
+      case "antigravity": return "Antigravity";
+      case "zcode": return "ZCode";
+      case "qoder": return "Qoder";
+      case "workbuddy": return "WorkBuddy";
       default: return "Claude";
     }
   }
@@ -186,6 +190,22 @@
   .engine-badge.omp {
     color: color-mix(in srgb, #eab308 70%, var(--text-2));
     border-color: color-mix(in srgb, #eab308 30%, var(--line));
+  }
+  .engine-badge.antigravity {
+    color: color-mix(in srgb, #c084fc 70%, var(--text-2));
+    border-color: color-mix(in srgb, #c084fc 30%, var(--line));
+  }
+  .engine-badge.zcode {
+    color: color-mix(in srgb, #3b82f6 70%, var(--text-2));
+    border-color: color-mix(in srgb, #3b82f6 30%, var(--line));
+  }
+  .engine-badge.qoder {
+    color: color-mix(in srgb, #f97316 70%, var(--text-2));
+    border-color: color-mix(in srgb, #f97316 30%, var(--line));
+  }
+  .engine-badge.workbuddy {
+    color: color-mix(in srgb, #14b8a6 70%, var(--text-2));
+    border-color: color-mix(in srgb, #14b8a6 30%, var(--line));
   }
   .session-btn:hover .engine-badge {
     border-color: var(--line-strong);

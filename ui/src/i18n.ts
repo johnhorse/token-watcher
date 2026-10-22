@@ -147,6 +147,11 @@ const zh = {
   "hud.tipInput": "输入 Token 数",
   "hud.tipOutput": "输出 Token 数",
   "hud.activeSessions": "活跃会话",
+  "iceberg.title": "Thinking Iceberg™ 思维链冰山",
+  "iceberg.share": "思维链占比",
+  "iceberg.surface": "水面输出",
+  "iceberg.deep": "深层思考",
+  "iceberg.desc": "背后隐藏消耗 {thoughts} 思考 Token，占总产出的 {pct}%",
 } as const;
 export type MessageKey = keyof typeof zh;
 
@@ -295,6 +300,11 @@ const en: Record<MessageKey, string> = {
   "hud.tipInput": "Input tokens",
   "hud.tipOutput": "Output tokens",
   "hud.activeSessions": "Active Sessions",
+  "iceberg.title": "Thinking Iceberg™",
+  "iceberg.share": "Thinking Share",
+  "iceberg.surface": "Surface Output",
+  "iceberg.deep": "Deep Thinking",
+  "iceberg.desc": "{thoughts} hidden thought tokens, {pct}% of total output",
 };
 const dict: Record<Lang, Record<MessageKey, string>> = { zh, en };
 function detectLang(): Lang {
