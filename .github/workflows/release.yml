@@ -99,12 +99,12 @@ jobs:
           import os, re
           ref = os.environ.get('GITHUB_REF_NAME', '')
           ver = ref.lstrip('v')
-          with open('CHANGELOG.md') as f:
+          with open('CHANGELOG.md', encoding='utf-8') as f:
               text = f.read()
           m = re.search(r'## \[' + re.escape(ver) + r'\][^\n]*\n(.*?)(?=\n## \[|\Z)', text, re.DOTALL)
           notes = m.group(1).strip() if m else f'token-watcher {ref}'
           output_file = os.environ.get('GITHUB_OUTPUT', '')
-          with open(output_file, 'a') as out:
+          with open(output_file, 'a', encoding='utf-8') as out:
               out.write('notes<<EOF\n' + notes + '\nEOF\n')
           "
 
