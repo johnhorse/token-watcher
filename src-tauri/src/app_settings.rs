@@ -96,10 +96,18 @@ pub struct AppSettings {
     pub hud_visible: bool,
     /// 桌面角落 HUD 是否锁定并穿透鼠标（默认 false）
     pub hud_locked: bool,
-    /// 桌面角落 HUD 记忆 X 坐标（逻辑像素，None 表示未保存或使用默认）
+    /// 桌面角落 HUD 记忆 X 坐标（兼容旧版字段，逻辑像素，None 表示未保存或使用默认）
     pub hud_x: Option<i32>,
-    /// 桌面角落 HUD 记忆 Y 坐标（逻辑像素，None 表示未保存或使用默认）
+    /// 桌面角落 HUD 记忆 Y 坐标（兼容旧版字段，逻辑像素，None 表示未保存或使用默认）
     pub hud_y: Option<i32>,
+    /// 桌面卡片小组件记忆 X 坐标（逻辑像素，None 表示未保存或使用默认）
+    pub widget_x: Option<i32>,
+    /// 桌面卡片小组件记忆 Y 坐标（逻辑像素，None 表示未保存或使用默认）
+    pub widget_y: Option<i32>,
+    /// 极简胶囊条记忆 X 坐标（逻辑像素，None 表示未保存或使用默认）
+    pub capsule_x: Option<i32>,
+    /// 极简胶囊条记忆 Y 坐标（逻辑像素，None 表示未保存或使用默认）
+    pub capsule_y: Option<i32>,
     /// 主题模式（默认 MeterFace 经典工控仪表）
     pub theme: ThemeMode,
     /// 开机自启动设置（None 表示首次运行未初始化，默认行为视为 true）
@@ -118,6 +126,10 @@ impl Default for AppSettings {
             hud_locked: false,
             hud_x: None,
             hud_y: None,
+            widget_x: None,
+            widget_y: None,
+            capsule_x: None,
+            capsule_y: None,
             theme: ThemeMode::MeterFace,
             autostart: None,
             hud_mode: HudMode::Widget,
@@ -148,6 +160,28 @@ impl AppSettings {
         self.autostart.unwrap_or(true)
     }
 
+    /// 获取指定形态对应的记忆坐标（向后兼容：小组件若未独立设置坐标，回退旧版单一 hud_x/hud_y；胶囊形态保持独立）
+    pub fn get_position_for_mode(&self, mode: HudMode) -> (Option<i32>, Option<i32>) {
+        match mode {
+            HudMode::Widget => (self.widget_x.or(self.hud_x), self.widget_y.or(self.hud_y)),
+            HudMode::Capsule => (self.capsule_x, self.capsule_y),
+        }
+    }
+    /// 设置指定形态的记忆坐标，并同步更新 hud_x/hud_y 以保证向前兼容
+    pub fn set_position_for_mode(&mut self, mode: HudMode, x: i32, y: i32) {
+        match mode {
+            HudMode::Widget => {
+                self.widget_x = Some(x);
+                self.widget_y = Some(y);
+            }
+            HudMode::Capsule => {
+                self.capsule_x = Some(x);
+                self.capsule_y = Some(y);
+            }
+        }
+        self.hud_x = Some(x);
+        self.hud_y = Some(y);
+    }
     /// 读取设置：文件不存在/不可读 → 默认值；内容损坏 → 默认值并重建文件。
     pub fn load(path: &Path) -> Self {
         match fs::read_to_string(path) {

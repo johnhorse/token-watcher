@@ -334,14 +334,8 @@ pub fn set_hud_visible(
     let mut settings = crate::app_settings::AppSettings::load(&settings_path);
     settings.hud_visible = visible;
     settings.save(&settings_path).map_err(|e| e.to_string())?;
-    crate::hud::ensure_hud_window(
-        &app,
-        visible,
-        settings.hud_locked,
-        settings.hud_mode,
-        settings.hud_x,
-        settings.hud_y,
-    )?;
+    let (x, y) = settings.get_position_for_mode(settings.hud_mode);
+    crate::hud::ensure_hud_window(&app, visible, settings.hud_locked, settings.hud_mode, x, y)?;
     crate::tray::sync_hud_menu_items(&app, &settings);
     Ok(())
 }
@@ -367,8 +361,7 @@ pub fn set_hud_locked(
 pub fn save_hud_position(state: State<'_, AppState>, x: i32, y: i32) -> Result<(), String> {
     let settings_path = crate::app_settings::path_for_db(&state.db_path);
     let mut settings = crate::app_settings::AppSettings::load(&settings_path);
-    settings.hud_x = Some(x);
-    settings.hud_y = Some(y);
+    settings.set_position_for_mode(settings.hud_mode, x, y);
     settings.save(&settings_path).map_err(|e| e.to_string())
 }
 
@@ -420,8 +413,8 @@ pub fn set_hud_mode(
         let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
             target_w, target_h,
         )));
-        let (safe_x, safe_y) =
-            crate::hud::calculate_safe_position(&app, settings.hud_x, settings.hud_y);
+        let (x, y) = settings.get_position_for_mode(new_mode);
+        let (safe_x, safe_y) = crate::hud::calculate_safe_position(&app, new_mode, x, y);
         let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
             safe_x as f64,
             safe_y as f64,
@@ -508,8 +501,7 @@ pub fn save_current_hud_position(app: AppHandle, state: State<'_, AppState>) -> 
                 let logical_y = (pos.y as f64 / scale).round() as i32;
                 let settings_path = crate::app_settings::path_for_db(&state.db_path);
                 let mut settings = crate::app_settings::AppSettings::load(&settings_path);
-                settings.hud_x = Some(logical_x);
-                settings.hud_y = Some(logical_y);
+                settings.set_position_for_mode(settings.hud_mode, logical_x, logical_y);
                 settings.save(&settings_path).map_err(|e| e.to_string())?;
             }
         }

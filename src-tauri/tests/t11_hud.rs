@@ -159,3 +159,67 @@ fn test_app_settings_hud_mode_roundtrip() {
         (250.0, 34.0)
     );
 }
+
+#[test]
+fn test_app_settings_independent_mode_positions() {
+    use token_watcher_lib::app_settings::HudMode;
+    let dir = std::env::temp_dir().join(format!("tw_test_hud_pos_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+
+    let mut settings = AppSettings::default();
+    assert_eq!(settings.widget_x, None);
+    assert_eq!(settings.widget_y, None);
+    assert_eq!(settings.capsule_x, None);
+    assert_eq!(settings.capsule_y, None);
+
+    // 分别设置小组件与胶囊的不同坐标
+    settings.set_position_for_mode(HudMode::Widget, 1200, 30);
+    settings.set_position_for_mode(HudMode::Capsule, 500, 20);
+
+    assert_eq!(settings.widget_x, Some(1200));
+    assert_eq!(settings.widget_y, Some(30));
+    assert_eq!(settings.capsule_x, Some(500));
+    assert_eq!(settings.capsule_y, Some(20));
+    // 前向兼容：设置形态坐标时同步镜像到旧版 hud_x/hud_y
+    assert_eq!(settings.hud_x, Some(500));
+    assert_eq!(settings.hud_y, Some(20));
+
+    assert_eq!(
+        settings.get_position_for_mode(HudMode::Widget),
+        (Some(1200), Some(30))
+    );
+    assert_eq!(
+        settings.get_position_for_mode(HudMode::Capsule),
+        (Some(500), Some(20))
+    );
+    settings.save(&path).unwrap();
+    let loaded = AppSettings::load(&path);
+    assert_eq!(
+        loaded.get_position_for_mode(HudMode::Widget),
+        (Some(1200), Some(30))
+    );
+    assert_eq!(
+        loaded.get_position_for_mode(HudMode::Capsule),
+        (Some(500), Some(20))
+    );
+
+    // 向后兼容测试：旧版 JSON 仅有 hud_x / hud_y
+    let legacy_json = r#"{
+        "hud_x": 880,
+        "hud_y": 60,
+        "hud_mode": "widget",
+        "hud_visible": true
+    }"#;
+    let legacy: AppSettings = serde_json::from_str(legacy_json).unwrap();
+    assert_eq!(legacy.widget_x, None);
+    assert_eq!(legacy.capsule_x, None);
+    // 小组件向后兼容继承旧版坐标
+    assert_eq!(
+        legacy.get_position_for_mode(HudMode::Widget),
+        (Some(880), Some(60))
+    );
+    // 胶囊保持独立 None，以触发专属屏幕居中顶部默认位置
+    assert_eq!(legacy.get_position_for_mode(HudMode::Capsule), (None, None));
+}

@@ -134,6 +134,18 @@ const zh = {
   "hud.switchToWidget": "切换为卡片小组件",
   "hud.dragHandle": "拖拽移动",
   "hud.todayLabel": "今日",
+  "hud.metricRate": "速率",
+  "hud.metricSession": "会话",
+  "hud.metricModel": "模型",
+  "hud.metricCache": "缓存",
+  "hud.metricInput": "输入",
+  "hud.metricOutput": "输出",
+  "hud.tipRate": "当前输出生成速率",
+  "hud.tipSession": "激活会话总 Token",
+  "hud.tipModel": "当前模型: {model}",
+  "hud.tipCache": "会话缓存命中率",
+  "hud.tipInput": "输入 Token 数",
+  "hud.tipOutput": "输出 Token 数",
 } as const;
 
 export type MessageKey = keyof typeof zh;
@@ -270,6 +282,18 @@ const en: Record<MessageKey, string> = {
   "hud.switchToWidget": "Switch to Widget",
   "hud.dragHandle": "Drag to move",
   "hud.todayLabel": "Today",
+  "hud.metricRate": "Rate",
+  "hud.metricSession": "Session",
+  "hud.metricModel": "Model",
+  "hud.metricCache": "Cache",
+  "hud.metricInput": "Input",
+  "hud.metricOutput": "Output",
+  "hud.tipRate": "Current generation rate",
+  "hud.tipSession": "Active session total tokens",
+  "hud.tipModel": "Current model: {model}",
+  "hud.tipCache": "Session cache hit rate",
+  "hud.tipInput": "Input tokens",
+  "hud.tipOutput": "Output tokens",
 };
 const dict: Record<Lang, Record<MessageKey, string>> = { zh, en };
 function detectLang(): Lang {

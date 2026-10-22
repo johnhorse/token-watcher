@@ -81,8 +81,24 @@
   });
 
   let cacheRateText = $derived(`${Math.round(summary.cache_rate)}%`);
-  let inputText = $derived(formatCompact(summary.input_tokens));
-  let outputText = $derived(formatCompact(summary.output_tokens));
+  let inputText = $derived(
+    formatCompact(
+      summary.input_tokens > 0
+        ? summary.input_tokens
+        : dashboard
+          ? dashboard.totals.input
+          : 0
+    )
+  );
+  let outputText = $derived(
+    formatCompact(
+      summary.output_tokens > 0
+        ? summary.output_tokens
+        : dashboard
+          ? dashboard.totals.output
+          : 0
+    )
+  );
 
   const THEME_NAMES: Record<string, MessageKey> = {
     "meter-face": "theme.meter",
@@ -402,14 +418,41 @@
         </button>
       </div>
 
-      {#if dashboard}
-        <div class="card-breakdown">
-          <span>{t("breakdown.input")} {formatCompact(dashboard.totals.input)}</span>
-          <span>{t("breakdown.output")} {formatCompact(dashboard.totals.output)}</span>
-          <span>{t("breakdown.cacheRead")} {formatCompact(dashboard.totals.cache_read)}</span>
-          <span>{t("breakdown.cacheWrite")} {formatCompact(dashboard.totals.cache_creation)}</span>
-        </div>
-      {/if}
+      <div class="card-metrics-grid">
+        {#each activeMetrics as metric}
+          {#if metric === "current_rate"}
+            <div class="metric-cell" title={t("hud.tipRate")}>
+              <span class="cell-label"><span class="cell-icon" aria-hidden="true">⚡️</span>{t("hud.metricRate")}</span>
+              <span class="cell-val rate-val">{rateText}</span>
+            </div>
+          {:else if metric === "session_total"}
+            <div class="metric-cell" title={t("hud.tipSession")}>
+              <span class="cell-label">{t("hud.metricSession")}</span>
+              <span class="cell-val total-val">{sessionTotalText}</span>
+            </div>
+          {:else if metric === "current_model"}
+            <div class="metric-cell" title={t("hud.tipModel", { model: summary.current_model })}>
+              <span class="cell-label"><span class="cell-icon" aria-hidden="true">🧠</span>{t("hud.metricModel")}</span>
+              <span class="cell-val model-val">{modelText}</span>
+            </div>
+          {:else if metric === "cache_rate"}
+            <div class="metric-cell" title={t("hud.tipCache")}>
+              <span class="cell-label"><span class="cell-icon" aria-hidden="true">💾</span>{t("hud.metricCache")}</span>
+              <span class="cell-val cache-val">{cacheRateText}</span>
+            </div>
+          {:else if metric === "input_tokens"}
+            <div class="metric-cell" title={t("hud.tipInput")}>
+              <span class="cell-label"><span class="cell-icon" aria-hidden="true">📥</span>{t("hud.metricInput")}</span>
+              <span class="cell-val input-val">{inputText}</span>
+            </div>
+          {:else if metric === "output_tokens"}
+            <div class="metric-cell" title={t("hud.tipOutput")}>
+              <span class="cell-label"><span class="cell-icon" aria-hidden="true">📤</span>{t("hud.metricOutput")}</span>
+              <span class="cell-val output-val">{outputText}</span>
+            </div>
+          {/if}
+        {/each}
+      </div>
     </section>
 
     <!-- Chart -->
@@ -732,13 +775,78 @@
     letter-spacing: 0.05em;
   }
 
-  .card-breakdown {
+  .card-metrics-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 4px 10px;
+    gap: 4px 8px;
+    margin-top: 4px;
+  }
+
+  .metric-cell {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 6px;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
     font-size: 10.5px;
+    min-height: 20px;
+    box-sizing: border-box;
+  }
+
+  .metric-cell:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+
+  .cell-label {
+    display: flex;
+    align-items: center;
+    gap: 3px;
     color: var(--text-2);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+
+  .cell-icon {
+    font-size: 10px;
+    line-height: 1;
+  }
+
+  .cell-val {
     font-family: var(--font-num);
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-1);
+    white-space: nowrap;
+  }
+
+  .cell-val.rate-val {
+    color: #94a3b8;
+  }
+
+  .cell-val.total-val {
+    color: var(--accent);
+  }
+
+  .cell-val.model-val {
+    color: #93c5fd;
+    max-width: 75px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .cell-val.cache-val {
+    color: #6ee7b7;
+  }
+
+  .cell-val.input-val {
+    color: #cbd5e1;
+  }
+
+  .cell-val.output-val {
+    color: #fca5a5;
   }
 
   .card-chart {

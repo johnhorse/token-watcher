@@ -16,7 +16,8 @@
         "title": "token-watcher",
         "width": 380,
         "height": 560,
-        "resizable": false
+        "resizable": false,
+        "center": true
       }
     ],
     "trayIcon": {

@@ -21,18 +21,20 @@ pub fn hud_size_for_mode(mode: crate::app_settings::HudMode) -> (f64, f64) {
     }
 }
 
-/// 计算 HUD 窗口安全坐标（P1-2 多显示器拔插与越界防护）
+/// 计算 HUD 窗口安全坐标（P1-2 多显示器拔插与越界防护，区分小组件与极简胶囊）
 pub fn calculate_safe_position(
     app: &AppHandle,
+    mode: crate::app_settings::HudMode,
     saved_x: Option<i32>,
     saved_y: Option<i32>,
 ) -> (i32, i32) {
     let monitors = app.available_monitors().unwrap_or_default();
+    let (target_w, target_h) = hud_size_for_mode(mode);
+    let hud_w = target_w as i32;
+    let hud_h = target_h as i32;
 
     if let (Some(x), Some(y)) = (saved_x, saved_y) {
         // 校验目标矩形是否与任一可用屏幕有至少 32px × 32px 的可见交集
-        let hud_w = HUD_CAPSULE_WIDTH as i32;
-        let hud_h = HUD_CAPSULE_HEIGHT as i32;
         for m in &monitors {
             let scale = m.scale_factor();
             let pos = m.position();
@@ -54,7 +56,7 @@ pub fn calculate_safe_position(
         }
     }
 
-    // 回退到主屏幕或第一个屏幕右上角
+    // 回退到默认位置：小组件在右上角，HUD 胶囊在屏幕中间最顶部
     let target_monitor = app
         .primary_monitor()
         .ok()
@@ -70,9 +72,18 @@ pub fn calculate_safe_position(
         let m_y = (pos.y as f64 / scale) as i32;
         let m_w = (size.width as f64 / scale) as i32;
 
-        let right_x = m_x + m_w - (HUD_WIDTH as i32) - 24;
-        let top_y = m_y + 24;
-        (right_x, top_y)
+        match mode {
+            crate::app_settings::HudMode::Widget => {
+                let right_x = m_x + m_w - hud_w - 24;
+                let top_y = m_y + 24;
+                (right_x, top_y)
+            }
+            crate::app_settings::HudMode::Capsule => {
+                let center_x = m_x + (m_w - hud_w) / 2;
+                let top_y = m_y + 24;
+                (center_x, top_y)
+            }
+        }
     } else {
         (100, 24)
     }
@@ -90,7 +101,7 @@ pub fn ensure_hud_window(
     let (target_w, target_h) = hud_size_for_mode(mode);
     if let Some(window) = app.get_webview_window(HUD_LABEL) {
         if visible {
-            let (target_x, target_y) = calculate_safe_position(app, x, y);
+            let (target_x, target_y) = calculate_safe_position(app, mode, x, y);
             let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
                 target_w, target_h,
             )));
@@ -107,7 +118,7 @@ pub fn ensure_hud_window(
     }
 
     if visible {
-        let (target_x, target_y) = calculate_safe_position(app, x, y);
+        let (target_x, target_y) = calculate_safe_position(app, mode, x, y);
         let window =
             WebviewWindowBuilder::new(app, HUD_LABEL, WebviewUrl::App("index.html".into()))
                 .title("token-watcher-hud")

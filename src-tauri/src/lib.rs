@@ -178,13 +178,14 @@ pub fn run() {
             }
 
             if settings.hud_visible {
+                let (x, y) = settings.get_position_for_mode(settings.hud_mode);
                 if let Err(e) = hud::ensure_hud_window(
                     app.handle(),
                     true,
                     settings.hud_locked,
                     settings.hud_mode,
-                    settings.hud_x,
-                    settings.hud_y,
+                    x,
+                    y,
                 ) {
                     eprintln!("[token-watcher] HUD 窗口恢复失败: {e}");
                 }
@@ -284,8 +285,8 @@ pub fn run() {
                         let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
                             target_w, target_h,
                         )));
-                        let (safe_x, safe_y) =
-                            hud::calculate_safe_position(app, settings.hud_x, settings.hud_y);
+                        let (x, y) = settings.get_position_for_mode(next_mode);
+                        let (safe_x, safe_y) = hud::calculate_safe_position(app, next_mode, x, y);
                         let _ = win.set_position(tauri::Position::Logical(
                             tauri::LogicalPosition::new(safe_x as f64, safe_y as f64),
                         ));
