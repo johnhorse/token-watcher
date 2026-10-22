@@ -178,6 +178,15 @@ export interface ProxyStatus {
   export_cmd: string;
 }
 
+export interface ActiveSessionItem {
+  session_id: string;
+  model: string;
+  session_total: number;
+  output_tokens: number;
+  current_rate: number;
+  last_active_ts: number;
+}
+
 export interface HudSummary {
   total_today: number;
   rate_per_min: number;
@@ -189,6 +198,10 @@ export interface HudSummary {
   output_tokens: number;
   hud_metrics: string[];
   hud_locked: boolean;
+  active_sessions?: ActiveSessionItem[];
+  capsule_opacity?: number;
+  widget_opacity?: number;
+  hud_active_sessions_count?: number;
 }
 
 export type Unsubscribe = () => void;

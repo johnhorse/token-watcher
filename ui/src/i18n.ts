@@ -146,8 +146,8 @@ const zh = {
   "hud.tipCache": "会话缓存命中率",
   "hud.tipInput": "输入 Token 数",
   "hud.tipOutput": "输出 Token 数",
+  "hud.activeSessions": "活跃会话",
 } as const;
-
 export type MessageKey = keyof typeof zh;
 
 const en: Record<MessageKey, string> = {
@@ -294,6 +294,7 @@ const en: Record<MessageKey, string> = {
   "hud.tipCache": "Session cache hit rate",
   "hud.tipInput": "Input tokens",
   "hud.tipOutput": "Output tokens",
+  "hud.activeSessions": "Active Sessions",
 };
 const dict: Record<Lang, Record<MessageKey, string>> = { zh, en };
 function detectLang(): Lang {

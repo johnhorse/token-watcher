@@ -224,6 +224,43 @@ pub fn show_hud_context_menu(
         tauri::menu::MenuItem::with_id(app, "hud-toggle-mode", mode_text, true, None::<&str>)
             .map_err(|e| e.to_string())?;
     items.push(Box::new(mode_item));
+    let (current_opacity, opacity_prefix, sub_title) = match settings.hud_mode {
+        crate::app_settings::HudMode::Capsule => (
+            settings.capsule_opacity,
+            "hud-capsule-opacity",
+            "极简胶囊透明度",
+        ),
+        crate::app_settings::HudMode::Widget => (
+            settings.widget_opacity,
+            "hud-widget-opacity",
+            "卡片小组件透明度",
+        ),
+    };
+    let mut op_items: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
+    for (val, label) in [
+        (1.0, "100% (不透明)"),
+        (0.9, "90%"),
+        (0.8, "80%"),
+        (0.7, "70%"),
+        (0.5, "50%"),
+    ] {
+        let is_checked = (current_opacity - val).abs() < 0.01;
+        let item = CheckMenuItem::with_id(
+            app,
+            format!("{opacity_prefix}-{val}"),
+            label,
+            true,
+            is_checked,
+            None::<&str>,
+        )
+        .map_err(|e| e.to_string())?;
+        op_items.push(Box::new(item));
+    }
+    let op_item_refs: Vec<&dyn IsMenuItem<tauri::Wry>> =
+        op_items.iter().map(|b| b.as_ref()).collect();
+    let op_sub = tauri::menu::Submenu::with_items(app, sub_title, true, &op_item_refs)
+        .map_err(|e| e.to_string())?;
+    items.push(Box::new(op_sub));
 
     let lock_text = if settings.hud_locked {
         "解锁 HUD"

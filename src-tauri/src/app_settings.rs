@@ -69,6 +69,18 @@ impl HudMode {
     }
 }
 
+pub fn default_capsule_opacity() -> f64 {
+    0.9
+}
+
+pub fn default_widget_opacity() -> f64 {
+    0.95
+}
+
+pub fn default_hud_active_sessions_count() -> usize {
+    3
+}
+
 /// app 自身设置（未来字段一律给 serde 默认值，保证旧文件可读）
 pub fn default_hud_metrics() -> Vec<String> {
     vec![
@@ -81,9 +93,8 @@ pub fn default_hud_metrics() -> Vec<String> {
 pub fn default_tray_metrics() -> Vec<TrayMetric> {
     vec![TrayMetric::Total]
 }
-
 /// app 自身设置（未来字段一律给 serde 默认值，保证旧文件可读）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
     /// 托盘显示指标（兼容旧字段单选）
@@ -114,8 +125,16 @@ pub struct AppSettings {
     pub autostart: Option<bool>,
     /// HUD 形态（默认 Widget 卡片小组件）
     pub hud_mode: HudMode,
+    /// 极简胶囊透明度（0.5 ~ 1.0，默认 0.9）
+    #[serde(default = "default_capsule_opacity")]
+    pub capsule_opacity: f64,
+    /// 卡片小组件透明度（0.5 ~ 1.0，默认 0.95）
+    #[serde(default = "default_widget_opacity")]
+    pub widget_opacity: f64,
+    /// HUD 激活会话最多展示条数（1/2/3/5，默认 3）
+    #[serde(default = "default_hud_active_sessions_count")]
+    pub hud_active_sessions_count: usize,
 }
-
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -133,6 +152,9 @@ impl Default for AppSettings {
             theme: ThemeMode::MeterFace,
             autostart: None,
             hud_mode: HudMode::Widget,
+            capsule_opacity: default_capsule_opacity(),
+            widget_opacity: default_widget_opacity(),
+            hud_active_sessions_count: default_hud_active_sessions_count(),
         }
     }
 }
@@ -193,6 +215,10 @@ impl AppSettings {
                     if settings.hud_metrics.len() < 2 {
                         settings.hud_metrics = default_hud_metrics();
                     }
+                    settings.capsule_opacity = settings.capsule_opacity.clamp(0.5, 1.0);
+                    settings.widget_opacity = settings.widget_opacity.clamp(0.5, 1.0);
+                    settings.hud_active_sessions_count =
+                        settings.hud_active_sessions_count.clamp(1, 5);
                     settings
                 }
                 Err(e) => {

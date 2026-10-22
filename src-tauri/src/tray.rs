@@ -15,15 +15,14 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconEvent};
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 
 use crate::app_settings::AppSettings;
 use crate::core::agg::{self, TrayMetric};
 use crate::core::store::Store;
 use crate::watch::WINDOW_LABEL;
-
 /// `tauri.conf.json` 的 `app.trayIcon` 未指定 id 时 Tauri 使用的默认 id
 const TRAY_ID: &str = "main";
 
@@ -266,8 +265,10 @@ static HUD_VISIBLE_ITEM: OnceLock<CheckMenuItem<Wry>> = OnceLock::new();
 static HUD_MODE_ITEM: OnceLock<MenuItem<Wry>> = OnceLock::new();
 static HUD_LOCKED_ITEM: OnceLock<CheckMenuItem<Wry>> = OnceLock::new();
 static AUTOSTART_ITEM: OnceLock<CheckMenuItem<Wry>> = OnceLock::new();
+static SESSIONS_ITEMS: OnceLock<Vec<(usize, CheckMenuItem<Wry>)>> = OnceLock::new();
+static CAPSULE_OPACITY_ITEMS: OnceLock<Vec<(f64, CheckMenuItem<Wry>)>> = OnceLock::new();
+static WIDGET_OPACITY_ITEMS: OnceLock<Vec<(f64, CheckMenuItem<Wry>)>> = OnceLock::new();
 static LANG: OnceLock<Lang> = OnceLock::new();
-
 /// 托盘初始化：复用 tauri.conf.json 创建的图标，挂菜单 / 事件 / 刷新线程。
 ///
 /// 返回数据线程用的通知发送端（[`TrayCommand::DataChanged`]）。
@@ -309,6 +310,74 @@ pub fn setup(
         initial_settings.hud_locked,
         None::<&str>,
     )?;
+    let mut session_items = Vec::new();
+    for (count, label) in [(1, "1 条"), (2, "2 条"), (3, "3 条 (默认)"), (5, "5 条")] {
+        let item = CheckMenuItem::with_id(
+            app,
+            format!("hud-sessions-{count}"),
+            label,
+            true,
+            initial_settings.hud_active_sessions_count == count,
+            None::<&str>,
+        )?;
+        session_items.push((count, item));
+    }
+    let session_refs: Vec<&dyn IsMenuItem<Wry>> = session_items
+        .iter()
+        .map(|(_, it)| it as &dyn IsMenuItem<Wry>)
+        .collect();
+    let sessions_submenu = Submenu::with_items(app, "活跃会话展示数", true, &session_refs)?;
+
+    let mut cap_op_items = Vec::new();
+    for (val, label) in [
+        (1.0, "100% (不透明)"),
+        (0.9, "90%"),
+        (0.8, "80%"),
+        (0.7, "70%"),
+        (0.5, "50%"),
+    ] {
+        let is_checked = (initial_settings.capsule_opacity - val).abs() < 0.01;
+        let item = CheckMenuItem::with_id(
+            app,
+            format!("hud-capsule-opacity-{val}"),
+            label,
+            true,
+            is_checked,
+            None::<&str>,
+        )?;
+        cap_op_items.push((val, item));
+    }
+    let cap_op_refs: Vec<&dyn IsMenuItem<Wry>> = cap_op_items
+        .iter()
+        .map(|(_, it)| it as &dyn IsMenuItem<Wry>)
+        .collect();
+    let capsule_opacity_submenu = Submenu::with_items(app, "极简胶囊透明度", true, &cap_op_refs)?;
+
+    let mut wid_op_items = Vec::new();
+    for (val, label) in [
+        (1.0, "100% (不透明)"),
+        (0.9, "90%"),
+        (0.8, "80%"),
+        (0.7, "70%"),
+        (0.5, "50%"),
+    ] {
+        let is_checked = (initial_settings.widget_opacity - val).abs() < 0.01;
+        let item = CheckMenuItem::with_id(
+            app,
+            format!("hud-widget-opacity-{val}"),
+            label,
+            true,
+            is_checked,
+            None::<&str>,
+        )?;
+        wid_op_items.push((val, item));
+    }
+    let wid_op_refs: Vec<&dyn IsMenuItem<Wry>> = wid_op_items
+        .iter()
+        .map(|(_, it)| it as &dyn IsMenuItem<Wry>)
+        .collect();
+    let widget_opacity_submenu = Submenu::with_items(app, "卡片小组件透明度", true, &wid_op_refs)?;
+
     let autostart_item = CheckMenuItem::with_id(
         app,
         ID_AUTOSTART,
@@ -340,6 +409,9 @@ pub fn setup(
     items.push(&hud_visible_item);
     items.push(&hud_mode_item);
     items.push(&hud_locked_item);
+    items.push(&sessions_submenu);
+    items.push(&capsule_opacity_submenu);
+    items.push(&widget_opacity_submenu);
     items.push(&sep2);
     items.push(&autostart_item);
     items.push(&toggle);
@@ -350,12 +422,14 @@ pub fn setup(
     let _ = HUD_VISIBLE_ITEM.set(hud_visible_item);
     let _ = HUD_MODE_ITEM.set(hud_mode_item);
     let _ = HUD_LOCKED_ITEM.set(hud_locked_item);
+    let _ = SESSIONS_ITEMS.set(session_items);
+    let _ = CAPSULE_OPACITY_ITEMS.set(cap_op_items);
+    let _ = WIDGET_OPACITY_ITEMS.set(wid_op_items);
     let _ = AUTOSTART_ITEM.set(autostart_item);
 
     // 文案同步用的全局句柄（set 失败只可能是重复初始化，忽略）
     let _ = WINDOW_ITEM.set(toggle);
     let _ = LANG.set(lang);
-
     // Windows：左键留给「显示主窗」；macOS 左键保持「弹出菜单」
     tray.set_show_menu_on_left_click(!cfg!(target_os = "windows"))?;
 
@@ -465,6 +539,33 @@ pub fn setup(
             sync_autostart_menu_item(new_enabled);
         } else if id == ID_TOGGLE_WINDOW {
             toggle_main_window(app);
+        } else if let Some(cnt_str) = id.strip_prefix("hud-sessions-") {
+            if let Ok(count) = cnt_str.parse::<usize>() {
+                let mut settings = AppSettings::load(&settings_path);
+                settings.hud_active_sessions_count = count.clamp(1, 5);
+                let _ = settings.save(&settings_path);
+                sync_hud_menu_items(app, &settings);
+                let _ = app.emit("hud-settings-changed", ());
+                let _ = app.emit("hud-updated", ());
+            }
+        } else if let Some(op_str) = id.strip_prefix("hud-capsule-opacity-") {
+            if let Ok(val) = op_str.parse::<f64>() {
+                let mut settings = AppSettings::load(&settings_path);
+                settings.capsule_opacity = val.clamp(0.5, 1.0);
+                let _ = settings.save(&settings_path);
+                sync_hud_menu_items(app, &settings);
+                let _ = app.emit("hud-settings-changed", ());
+                let _ = app.emit("hud-updated", ());
+            }
+        } else if let Some(op_str) = id.strip_prefix("hud-widget-opacity-") {
+            if let Ok(val) = op_str.parse::<f64>() {
+                let mut settings = AppSettings::load(&settings_path);
+                settings.widget_opacity = val.clamp(0.5, 1.0);
+                let _ = settings.save(&settings_path);
+                sync_hud_menu_items(app, &settings);
+                let _ = app.emit("hud-settings-changed", ());
+                let _ = app.emit("hud-updated", ());
+            }
         } else if id == ID_QUIT {
             app.exit(0);
         }
@@ -562,6 +663,21 @@ pub fn sync_hud_menu_items(_app: &AppHandle, settings: &AppSettings) {
     if let Some(item) = HUD_LOCKED_ITEM.get() {
         let _ = item.set_checked(settings.hud_locked);
         let _ = item.set_enabled(settings.hud_visible);
+    }
+    if let Some(items) = SESSIONS_ITEMS.get() {
+        for (count, item) in items {
+            let _ = item.set_checked(*count == settings.hud_active_sessions_count);
+        }
+    }
+    if let Some(items) = CAPSULE_OPACITY_ITEMS.get() {
+        for (val, item) in items {
+            let _ = item.set_checked((settings.capsule_opacity - *val).abs() < 0.01);
+        }
+    }
+    if let Some(items) = WIDGET_OPACITY_ITEMS.get() {
+        for (val, item) in items {
+            let _ = item.set_checked((settings.widget_opacity - *val).abs() < 0.01);
+        }
     }
 }
 

@@ -63,8 +63,7 @@
     formatCompact(summary.session_total > 0 ? summary.session_total : summary.total_today)
   );
 
-  let modelText = $derived.by(() => {
-    const raw = summary.current_model || "";
+  function cleanModelName(raw?: string): string {
     if (!raw || raw === "—") return "—";
     if (raw.includes("sonnet-3-7") || raw.includes("3.7-sonnet")) return "Sonnet 3.7";
     if (raw.includes("sonnet-3-5") || raw.includes("3.5-sonnet")) return "Sonnet 3.5";
@@ -78,8 +77,15 @@
     if (raw.includes("deepseek")) return "DeepSeek";
     if (raw.includes("glm")) return "GLM";
     return raw.split("-")[0];
-  });
+  }
 
+  let modelText = $derived(cleanModelName(summary.current_model));
+
+  let activeSessions = $derived(
+    summary.active_sessions && summary.active_sessions.length > 0
+      ? summary.active_sessions.slice(0, summary.hud_active_sessions_count ?? 3)
+      : []
+  );
   let cacheRateText = $derived(`${Math.round(summary.cache_rate)}%`);
   let inputText = $derived(
     formatCompact(
@@ -145,10 +151,16 @@
   $effect(() => {
     if (hudMode === "capsule") {
       const count = activeMetrics.length;
-      const targetWidth = Math.max(180, Math.min(520, 180 + (count - 2) * 70));
-      void adapter.resizeHud(targetWidth, 34);
+      const sessionsCount = activeSessions.length;
+      const targetWidth = sessionsCount > 1
+        ? Math.max(240, Math.min(520, 180 + (count - 2) * 70))
+        : Math.max(180, Math.min(520, 180 + (count - 2) * 70));
+      const targetHeight = sessionsCount > 1 ? 34 + (sessionsCount - 1) * 28 : 34;
+      void adapter.resizeHud(targetWidth, targetHeight);
     } else {
-      void adapter.resizeHud(320, 390);
+      const sessionsCount = activeSessions.length;
+      const targetHeight = sessionsCount > 1 ? 390 + 36 + sessionsCount * 24 : 390;
+      void adapter.resizeHud(320, targetHeight);
     }
   });
 
@@ -347,7 +359,12 @@
     };
   });
 </script>
-
+<div
+  class="hud-app"
+  class:is-widget={hudMode === "widget"}
+  class:is-capsule={hudMode === "capsule"}
+  style="--capsule-opacity: {summary.capsule_opacity ?? 0.9}; --widget-opacity: {summary.widget_opacity ?? 0.95};"
+>
 {#if hudMode === "widget"}
   <main
     class="hud-card"
@@ -453,6 +470,24 @@
           {/if}
         {/each}
       </div>
+      {#if activeSessions.length > 1}
+        <div class="card-active-sessions">
+          <div class="active-sessions-header">
+            <span class="active-title">{t("hud.activeSessions")}</span>
+            <span class="active-count">{activeSessions.length}</span>
+          </div>
+          <div class="active-sessions-list">
+            {#each activeSessions as sess, idx}
+              <div class="active-session-item">
+                <span class="sess-idx">#{idx + 1}</span>
+                <span class="sess-model" title={sess.model}>{cleanModelName(sess.model)}</span>
+                <span class="sess-rate">{sess.current_rate > 0 ? `⚡️${Math.round(sess.current_rate)}/s` : "—"}</span>
+                <span class="sess-total">{formatCompact(sess.session_total)}</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
     </section>
 
     <!-- Chart -->
@@ -475,6 +510,7 @@
 {:else}
   <main
     class="hud-pill"
+    class:is-multi={activeSessions.length > 1}
     class:pulsing={isPulsing}
     class:locked={summary.hud_locked}
     data-mode="capsule"
@@ -483,51 +519,74 @@
     onpointermove={handlePointerMove}
     onpointerup={handlePointerUp}
     oncontextmenu={handleContextMenu}
-    title={`会话: ${formatExact(summary.session_total)} | 今日: ${formatExact(summary.total_today)} tokens`}
+    title={activeSessions.length > 1 ? `今日: ${formatExact(summary.total_today)} tokens · ${activeSessions.length} 条激活会话` : `会话: ${formatExact(summary.session_total)} | 今日: ${formatExact(summary.total_today)} tokens`}
   >
-    {#each activeMetrics as metric, index}
-      {#if index > 0}
-        <div class="hud-divider"></div>
-      {/if}
+    {#if activeSessions.length > 1}
+      <div class="multi-sessions-list">
+        {#each activeSessions as sess, idx}
+          <div class="session-row-pill" title={`会话: ${sess.session_id} | 累计: ${formatExact(sess.session_total)} tokens`}>
+            <span class="session-index">#{idx + 1}</span>
+            <div class="session-metric rate-metric">
+              <span class="hud-icon" aria-hidden="true">⚡️</span>
+              <span class="hud-rate-val">{sess.current_rate > 0 ? `${Math.round(sess.current_rate)}/s` : "—"}</span>
+            </div>
+            <div class="session-divider"></div>
+            <div class="session-metric total-metric">
+              <span class="hud-total-val">{formatCompact(sess.session_total)}</span>
+            </div>
+            <div class="session-divider"></div>
+            <div class="session-metric model-metric">
+              <span class="hud-icon" aria-hidden="true">🧠</span>
+              <span class="hud-model-val">{cleanModelName(sess.model)}</span>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      {#each activeMetrics as metric, index}
+        {#if index > 0}
+          <div class="hud-divider"></div>
+        {/if}
 
-      {#if metric === "current_rate"}
-        <div class="hud-section rate-section" title="当前输出生成速率">
-          <span class="hud-icon">⚡️</span>
-          <span class="hud-rate-val">{rateText}</span>
-        </div>
-      {:else if metric === "session_total"}
-        <div class="hud-section total-section" title="激活会话总 Token">
-          <span class="hud-total-val">{sessionTotalText}</span>
-        </div>
-      {:else if metric === "current_model"}
-        <div class="hud-section model-section" title={`当前模型: ${summary.current_model}`}>
-          <span class="hud-icon">🧠</span>
-          <span class="hud-model-val">{modelText}</span>
-        </div>
-      {:else if metric === "cache_rate"}
-        <div class="hud-section cache-section" title="会话缓存命中率">
-          <span class="hud-icon">💾</span>
-          <span class="hud-cache-val">{cacheRateText}</span>
-        </div>
-      {:else if metric === "input_tokens"}
-        <div class="hud-section input-section" title="输入 Token 数">
-          <span class="hud-icon">📥</span>
-          <span class="hud-val">{inputText}</span>
-        </div>
-      {:else if metric === "output_tokens"}
-        <div class="hud-section output-section" title="输出 Token 数">
-          <span class="hud-icon">📤</span>
-          <span class="hud-val">{outputText}</span>
-        </div>
-      {/if}
-    {/each}
+        {#if metric === "current_rate"}
+          <div class="hud-section rate-section" title={t("hud.tipRate")}>
+            <span class="hud-icon">⚡️</span>
+            <span class="hud-rate-val">{rateText}</span>
+          </div>
+        {:else if metric === "session_total"}
+          <div class="hud-section total-section" title={t("hud.tipSession")}>
+            <span class="hud-total-val">{sessionTotalText}</span>
+          </div>
+        {:else if metric === "current_model"}
+          <div class="hud-section model-section" title={t("hud.tipModel", { model: summary.current_model })}>
+            <span class="hud-icon">🧠</span>
+            <span class="hud-model-val">{modelText}</span>
+          </div>
+        {:else if metric === "cache_rate"}
+          <div class="hud-section cache-section" title={t("hud.tipCache")}>
+            <span class="hud-icon">💾</span>
+            <span class="hud-cache-val">{cacheRateText}</span>
+          </div>
+        {:else if metric === "input_tokens"}
+          <div class="hud-section input-section" title={t("hud.tipInput")}>
+            <span class="hud-icon">📥</span>
+            <span class="hud-val">{inputText}</span>
+          </div>
+        {:else if metric === "output_tokens"}
+          <div class="hud-section output-section" title={t("hud.tipOutput")}>
+            <span class="hud-icon">📤</span>
+            <span class="hud-val">{outputText}</span>
+          </div>
+        {/if}
+      {/each}
+    {/if}
   </main>
 {/if}
-
+</div>
 <style>
-  :global(html),
-  :global(body),
-  :global(#app) {
+  :global(html[data-hud]),
+  :global(html[data-hud] body),
+  :global(html[data-hud] #app) {
     margin: 0;
     padding: 0;
     width: 100vw;
@@ -550,7 +609,7 @@
     justify-content: space-between;
     padding: 0 12px;
     border-radius: 9999px;
-    background: rgba(22, 24, 29, 0.90);
+    background: rgba(22, 24, 29, var(--capsule-opacity, 0.90));
     border: 1px solid rgba(255, 255, 255, 0.12);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
     cursor: grab;
@@ -568,7 +627,7 @@
 
   .hud-pill.pulsing {
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    background: rgba(26, 28, 34, 0.94);
+    background: rgba(26, 28, 34, var(--capsule-opacity, 0.90));
   }
 
   .hud-section {
@@ -638,6 +697,139 @@
     color: #93c5fd;
   }
 
+  /* 多行垂直平铺胶囊样式 */
+  .hud-pill.is-multi {
+    height: 100vh;
+    padding: 3px 6px;
+    border-radius: 12px;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+  }
+
+  .multi-sessions-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .session-row-pill {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 11px;
+    gap: 6px;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .session-index {
+    font-size: 9.5px;
+    font-weight: 700;
+    color: var(--accent);
+    opacity: 0.9;
+    font-family: var(--font-num);
+    width: 14px;
+    flex-shrink: 0;
+  }
+
+  .session-metric {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    white-space: nowrap;
+  }
+
+  .session-metric.model-metric {
+    flex: 1;
+    justify-content: flex-end;
+    overflow: hidden;
+  }
+
+  .session-metric.model-metric .hud-model-val {
+    max-width: 75px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .session-divider {
+    width: 1px;
+    height: 10px;
+    background: rgba(255, 255, 255, 0.12);
+    margin: 0 1px;
+    flex-shrink: 0;
+  }
+
+  /* 小组件活跃会话微卡片 */
+  .card-active-sessions {
+    margin-top: 6px;
+    padding: 6px 8px;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+  }
+  .active-sessions-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--text-2);
+    margin-bottom: 4px;
+  }
+  .active-count {
+    font-family: var(--font-num);
+    font-size: 9.5px;
+    background: var(--bg-2);
+    padding: 1px 4px;
+    border-radius: 2px;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .active-sessions-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .active-session-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 10.5px;
+    gap: 6px;
+  }
+  .sess-idx {
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--accent);
+    width: 14px;
+    flex-shrink: 0;
+  }
+  .sess-model {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-1);
+    font-size: 10px;
+  }
+  .sess-rate {
+    font-family: var(--font-num);
+    color: #94a3b8;
+    font-size: 10px;
+  }
+  .sess-total {
+    font-family: var(--font-num);
+    font-weight: 600;
+    color: var(--text-2);
+    font-size: 10px;
+  }
+
   /* ---------------- 卡片小组件 (Widget) ---------------- */
   .hud-card {
     width: 100vw;
@@ -647,7 +839,7 @@
     flex-direction: column;
     padding: 12px 14px 14px;
     border-radius: 12px;
-    background: color-mix(in srgb, var(--bg) 92%, #000 8%);
+    background: rgba(24, 26, 32, var(--widget-opacity, 0.95));
     border: 1px solid var(--line-strong);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
     cursor: default;

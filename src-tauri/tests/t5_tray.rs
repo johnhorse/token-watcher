@@ -228,6 +228,7 @@ fn record(ts_ms: i64) -> UsageRecord {
         is_sidechain: false,
         cwd: None,
         cc_version: None,
+        duration_ms: None,
     }
 }
 

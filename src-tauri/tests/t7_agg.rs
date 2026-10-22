@@ -41,6 +41,7 @@ fn rec(id: &str, session: &str, ts_ms: i64, input: i64, output: i64) -> UsageRec
         is_sidechain: false,
         cwd: None,
         cc_version: None,
+        duration_ms: None,
     }
 }
 
@@ -508,6 +509,7 @@ fn large_fixture_dashboard_stays_fast() {
             is_sidechain: false,
             cwd: None,
             cc_version: None,
+            duration_ms: None,
         })
         .collect();
     store.upsert_records(&records).unwrap();

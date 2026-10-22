@@ -91,6 +91,23 @@ jobs:
         working-directory: ui
         run: npm ci
 
+      - name: Extract release notes
+        id: release_notes
+        shell: bash
+        run: |
+          python3 -c "
+          import os, re
+          ref = os.environ.get('GITHUB_REF_NAME', '')
+          ver = ref.lstrip('v')
+          with open('CHANGELOG.md') as f:
+              text = f.read()
+          m = re.search(r'## \[' + re.escape(ver) + r'\][^\n]*\n(.*?)(?=\n## \[|\Z)', text, re.DOTALL)
+          notes = m.group(1).strip() if m else f'token-watcher {ref}'
+          output_file = os.environ.get('GITHUB_OUTPUT', '')
+          with open(output_file, 'a') as out:
+              out.write('notes<<EOF\n' + notes + '\nEOF\n')
+          "
+
       # 仓库根没有 package.json，显式指定 ui/ 下锁定版本的 tauri-cli；
       # tauri.conf.json 位于 src-tauri/，projectPath 保持仓库根即可被找到。
       - uses: tauri-apps/tauri-action@v1
@@ -104,4 +121,5 @@ jobs:
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: false
+          releaseBody: ${{ steps.release_notes.outputs.notes }}
           args: ${{ matrix.args }}

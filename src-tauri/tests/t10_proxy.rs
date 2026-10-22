@@ -56,6 +56,7 @@ fn sample_usage_record(record_id: &str, ts_ms: i64) -> UsageRecord {
         is_sidechain: false,
         cwd: Some("/test".to_string()),
         cc_version: Some("2.1.303".to_string()),
+        duration_ms: None,
     }
 }
 

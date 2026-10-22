@@ -150,6 +150,17 @@ pub struct Dashboard {
     pub available_engines: Vec<EngineSlice>,
 }
 /// 桌面角落 HUD 紧凑概览数据（< 1ms 轻量查询）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ActiveSessionItem {
+    pub session_id: String,
+    pub model: String,
+    pub session_total: i64,
+    pub output_tokens: i64,
+    pub current_rate: f64,
+    pub last_active_ts: i64,
+}
+
+/// 桌面角落 HUD 紧凑概览数据（< 1ms 轻量查询）
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct HudSummary {
     /// 今日累计总 Token
@@ -172,8 +183,29 @@ pub struct HudSummary {
     pub hud_metrics: Vec<String>,
     /// 鼠标穿透锁定状态
     pub hud_locked: bool,
+    /// 多激活会话列表
+    #[serde(default)]
+    pub active_sessions: Vec<ActiveSessionItem>,
+    /// 极简胶囊透明度
+    #[serde(default = "default_capsule_op")]
+    pub capsule_opacity: f64,
+    /// 卡片小组件透明度
+    #[serde(default = "default_widget_op")]
+    pub widget_opacity: f64,
+    /// 活跃会话展示条数限制
+    #[serde(default = "default_active_sess_count")]
+    pub hud_active_sessions_count: usize,
 }
 
+fn default_capsule_op() -> f64 {
+    0.9
+}
+fn default_widget_op() -> f64 {
+    0.95
+}
+fn default_active_sess_count() -> usize {
+    3
+}
 /// 脉冲谱带点（轻量，用于顶部谱带渲染）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PulsePoint {
@@ -545,12 +577,23 @@ pub fn hud_summary_with_metrics_at(
     hud_metrics: &[String],
     now_ms: i64,
 ) -> Result<HudSummary, CoreError> {
+    hud_summary_with_options_at(store, hud_locked, hud_metrics, 3, now_ms)
+}
+
+/// HUD 紧凑数据（带指标列表定制与激活会话数量限制）
+pub fn hud_summary_with_options_at(
+    store: &Store,
+    hud_locked: bool,
+    hud_metrics: &[String],
+    active_sessions_limit: usize,
+    now_ms: i64,
+) -> Result<HudSummary, CoreError> {
     let today = local_date_at(store, now_ms)?;
     let (start_ms, end_ms) = store.local_day_bounds(&today)?;
     let total_today = token_totals(store.totals_between(start_ms, end_ms)?).total;
 
-    // 1. 查询最近活跃的会话及其聚合数据与模型
-    let active_session_row = {
+    let limit = active_sessions_limit.clamp(1, 5);
+    let active_session_rows = {
         let mut stmt = store.conn().prepare_cached(
             "SELECT session_id,
                     MAX(timestamp_ms) AS last_ts,
@@ -558,38 +601,148 @@ pub fn hud_summary_with_metrics_at(
                     SUM(input_tokens),
                     SUM(output_tokens),
                     SUM(cache_read_tokens),
-                    SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens)
+                    SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens) AS total
              FROM usage_records
              WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2
              GROUP BY session_id
-             ORDER BY last_ts DESC
-             LIMIT 1",
+             ORDER BY last_ts DESC, session_id DESC
+             LIMIT ?3",
         )?;
-        stmt.query_row(params![start_ms, end_ms], |row| {
-            let session_id: String = row.get(0)?;
-            let last_ts: i64 = row.get(1)?;
-            let model: String = row.get(2)?;
-            let input: i64 = row.get(3)?;
-            let output: i64 = row.get(4)?;
-            let cache_read: i64 = row.get(5)?;
-            let total: i64 = row.get(6)?;
-            Ok((session_id, last_ts, model, input, output, cache_read, total))
-        })
-        .ok()
+        let rows = stmt
+            .query_map(params![start_ms, end_ms, limit as i64], |row| {
+                let session_id: String = row.get(0)?;
+                let last_ts: i64 = row.get(1)?;
+                let model: String = row.get(2)?;
+                let input: i64 = row.get(3)?;
+                let output: i64 = row.get(4)?;
+                let cache_read: i64 = row.get(5)?;
+                let total: i64 = row.get(6)?;
+                Ok((session_id, last_ts, model, input, output, cache_read, total))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
     };
 
-    let (session_total, current_model, cache_rate, input_tokens, output_tokens, last_active_ts) =
-        if let Some((_, last_ts, model, input, output, cache_read, total)) = active_session_row {
-            let denom = input + cache_read;
-            let cr = if denom > 0 {
-                (cache_read as f64 / denom as f64) * 100.0
-            } else {
-                0.0
+    let mut active_sessions = Vec::new();
+    let mut primary_rate = 0.0;
+
+    let mut rec_stmt = store.conn().prepare_cached(
+        "SELECT output_tokens, duration_ms, timestamp_ms
+         FROM usage_records
+         WHERE session_id = ?1 AND timestamp_ms >= ?2 AND timestamp_ms < ?3
+         ORDER BY timestamp_ms DESC, record_id DESC
+         LIMIT 6",
+    )?;
+
+    for (sess_id, last_ts, model, _input, sess_output, _cache_read, sess_total) in
+        &active_session_rows
+    {
+        let recent_records = rec_stmt
+            .query_map(params![sess_id, start_ms, end_ms], |row| {
+                let out: i64 = row.get(0)?;
+                let dur: Option<i64> = row.get(1)?;
+                let ts: i64 = row.get(2)?;
+                Ok((out, dur, ts))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut rate = 0.0;
+
+        // 1. 优先从最近相邻 2 轮计算速率
+        if recent_records.len() >= 2 {
+            let (out1, dur1, ts1) = recent_records[0];
+            let (out2, dur2, ts2) = recent_records[1];
+            let total_out = out1 + out2;
+            let total_dur = match (dur1, dur2) {
+                (Some(d1), Some(d2)) if (d1 + d2) > 0 => Some((d1 + d2) as f64 / 1000.0),
+                _ => {
+                    let diff = (ts1 - ts2).abs();
+                    if diff <= 120_000 && diff > 0 {
+                        Some(diff as f64 / 1000.0)
+                    } else {
+                        dur1.filter(|&d| d > 0).map(|d1| d1 as f64 / 1000.0)
+                    }
+                }
             };
-            (total, model, cr, input, output, last_ts)
+            if let Some(sec) = total_dur {
+                if sec > 0.1 && total_out > 0 {
+                    rate = (total_out as f64 / sec).max(0.0);
+                }
+            }
+        }
+
+        // 2. 若最新 2 轮间隔过大（用户离开），寻找该会话最近一对有效相邻轮次（<= 120s）保持其最新有效速率
+        if rate <= 0.0 && recent_records.len() >= 2 {
+            for window in recent_records.windows(2) {
+                let (out1, dur1, ts1) = window[0];
+                let (out2, dur2, ts2) = window[1];
+                let total_out = out1 + out2;
+                let dur_sec = match (dur1, dur2) {
+                    (Some(d1), Some(d2)) if (d1 + d2) > 0 => Some((d1 + d2) as f64 / 1000.0),
+                    _ => {
+                        let diff = (ts1 - ts2).abs();
+                        if diff <= 120_000 && diff > 0 {
+                            Some(diff as f64 / 1000.0)
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some(sec) = dur_sec {
+                    if sec > 0.1 && total_out > 0 {
+                        rate = (total_out as f64 / sec).max(0.0);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 3. 若仍未算出且有具备精确耗时的单轮记录，按单轮计算
+        if rate <= 0.0 {
+            for &(out, dur, _) in &recent_records {
+                if let Some(d) = dur.filter(|&d| d > 0) {
+                    if d >= 100 && out > 0 {
+                        rate = (out as f64 / (d as f64 / 1000.0)).max(0.0);
+                        break;
+                    }
+                }
+            }
+        }
+        if active_sessions.is_empty() {
+            primary_rate = rate;
+        }
+
+        active_sessions.push(ActiveSessionItem {
+            session_id: sess_id.clone(),
+            model: model.clone(),
+            session_total: *sess_total,
+            output_tokens: *sess_output,
+            current_rate: rate,
+            last_active_ts: *last_ts,
+        });
+    }
+
+    let (session_total, current_model, cache_rate, input_tokens, output_tokens) = if let Some((
+        _,
+        _,
+        model,
+        input,
+        output,
+        cache_read,
+        total,
+    )) =
+        active_session_rows.first()
+    {
+        let denom = *input + *cache_read;
+        let cr = if denom > 0 {
+            (*cache_read as f64 / denom as f64) * 100.0
         } else {
-            (0, "—".to_string(), 0.0, 0, 0, 0)
+            0.0
         };
+        (*total, model.clone(), cr, *input, *output)
+    } else {
+        (0, "—".to_string(), 0.0, 0, 0)
+    };
 
     // 2. 燃烧速率 (rate_per_min) 保持 5 分钟总窗口平均（契约兼容）：
     let five_min_ago = now_ms - ACTIVE_WINDOW_MS;
@@ -597,42 +750,8 @@ pub fn hud_summary_with_metrics_at(
     let rate_per_min = (sum_5m / 5).max(0);
 
     // 3. 瞬时生成速率 (current_rate, tokens/s)：
-    // 仅基于活跃窗口（≤ 30s）内的 output_tokens 输出量与耗时计算，绝不掺入巨大的输入/缓存读取量。
-    let is_active = last_active_ts > 0 && (now_ms - last_active_ts) <= 30_000;
-    let current_rate = if is_active {
-        let window_start = now_ms - 30_000;
-        let mut stmt = store.conn().prepare_cached(
-            "SELECT timestamp_ms, output_tokens FROM usage_records
-             WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
-             ORDER BY timestamp_ms ASC",
-        )?;
-        let records = stmt
-            .query_map(params![window_start, now_ms + 1000], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if records.is_empty() {
-            0.0
-        } else {
-            let total_out: i64 = records.iter().map(|(_, out)| *out).sum();
-            let first_ts = records.first().unwrap().0;
-            let last_ts = records.last().unwrap().0;
-            let time_span_s = if records.len() > 1 && (last_ts - first_ts) >= 1000 {
-                (last_ts - first_ts) as f64 / 1000.0
-            } else {
-                let elapsed = (now_ms - last_ts).max(1000) as f64 / 1000.0;
-                elapsed.min(10.0)
-            };
-            if time_span_s > 0.0 {
-                (total_out as f64 / time_span_s).max(0.0)
-            } else {
-                0.0
-            }
-        }
-    } else {
-        0.0
-    };
+    // 沿用已计算出的最新有效速率（闲置时不重置为 0.0）
+    let current_rate = primary_rate;
 
     Ok(HudSummary {
         total_today,
@@ -645,6 +764,10 @@ pub fn hud_summary_with_metrics_at(
         output_tokens,
         hud_metrics: hud_metrics.to_vec(),
         hud_locked,
+        active_sessions,
+        capsule_opacity: 0.9,
+        widget_opacity: 0.95,
+        hud_active_sessions_count: limit,
     })
 }
 

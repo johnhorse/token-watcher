@@ -70,6 +70,7 @@ fn make_record(
         is_sidechain,
         cwd: Some("/Volumes/Data/projects/token-watcher".to_string()),
         cc_version: Some("1.0.0".to_string()),
+        duration_ms: None,
     }
 }
 

@@ -67,6 +67,7 @@ fn make_record(
         is_sidechain: false,
         cwd: Some("/test".to_string()),
         cc_version: None,
+        duration_ms: None,
     }
 }
 

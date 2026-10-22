@@ -307,6 +307,30 @@ pub fn run() {
                     tray::sync_hud_menu_items(app, &settings);
                     let _ = app.emit("hud-updated", ());
                 }
+            } else if let Some(op_str) = id.strip_prefix("hud-capsule-opacity-") {
+                if let Ok(val) = op_str.parse::<f64>() {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        let settings_path = app_settings::path_for_db(&state.db_path);
+                        let mut settings = AppSettings::load(&settings_path);
+                        settings.capsule_opacity = val.clamp(0.5, 1.0);
+                        let _ = settings.save(&settings_path);
+                        tray::sync_hud_menu_items(app, &settings);
+                        let _ = app.emit("hud-settings-changed", ());
+                        let _ = app.emit("hud-updated", ());
+                    }
+                }
+            } else if let Some(op_str) = id.strip_prefix("hud-widget-opacity-") {
+                if let Ok(val) = op_str.parse::<f64>() {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        let settings_path = app_settings::path_for_db(&state.db_path);
+                        let mut settings = AppSettings::load(&settings_path);
+                        settings.widget_opacity = val.clamp(0.5, 1.0);
+                        let _ = settings.save(&settings_path);
+                        tray::sync_hud_menu_items(app, &settings);
+                        let _ = app.emit("hud-settings-changed", ());
+                        let _ = app.emit("hud-updated", ());
+                    }
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -337,6 +361,8 @@ pub fn run() {
             commands::open_external_url,
             commands::show_hud_context_menu,
             commands::toggle_hud_metric,
+            commands::set_hud_opacity,
+            commands::set_hud_active_sessions_count,
             commands::log_js_error,
         ])
         .build(tauri::generate_context!());

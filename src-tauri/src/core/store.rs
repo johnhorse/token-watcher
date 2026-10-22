@@ -21,8 +21,7 @@ use super::parse::UsageRecord;
 use super::CoreError;
 
 /// 当前 schema 版本。加表/改表时递增并在 migrate 里追加版本迁移分支。
-pub const SCHEMA_VERSION: i64 = 5;
-
+pub const SCHEMA_VERSION: i64 = 6;
 /// 每条 SQL 事务提交的用量记录条数
 pub const UPSERT_BATCH: usize = 500;
 
@@ -90,8 +89,8 @@ const UPSERT_SQL: &str = r#"
 INSERT INTO usage_records (
     record_id, session_id, timestamp_ms, input_tokens, output_tokens,
     cache_read_tokens, cache_creation_tokens, model, entrypoint,
-    is_sidechain, cwd, cc_version, profile_id, attribution_source
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+    is_sidechain, cwd, cc_version, profile_id, attribution_source, duration_ms
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
 ON CONFLICT(record_id) DO UPDATE SET
     session_id            = excluded.session_id,
     timestamp_ms          = excluded.timestamp_ms,
@@ -104,6 +103,7 @@ ON CONFLICT(record_id) DO UPDATE SET
     is_sidechain          = excluded.is_sidechain,
     cwd                   = excluded.cwd,
     cc_version            = excluded.cc_version,
+    duration_ms           = excluded.duration_ms,
     profile_id            = CASE
         WHEN usage_records.attribution_source = 'manual' THEN usage_records.profile_id
         WHEN excluded.attribution_source = 'proxy' THEN excluded.profile_id
@@ -115,7 +115,6 @@ ON CONFLICT(record_id) DO UPDATE SET
         ELSE usage_records.attribution_source
     END
 "#;
-
 const TOTALS_SQL: &str = r#"
 SELECT COALESCE(SUM(input_tokens), 0),
        COALESCE(SUM(output_tokens), 0),
@@ -416,6 +415,14 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        if version < 6 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(
+                "ALTER TABLE usage_records ADD COLUMN duration_ms INTEGER;
+                 PRAGMA user_version = 6;",
+            )?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -486,6 +493,7 @@ impl Store {
                         r.cc_version,
                         profile_id,
                         attr_source,
+                        r.duration_ms,
                     ])?;
                 }
             }

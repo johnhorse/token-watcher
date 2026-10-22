@@ -21,6 +21,7 @@ fn sample_record(msg_id: &str, ts_ms: i64, tokens: (i64, i64, i64, i64)) -> Usag
         is_sidechain: false,
         cwd: None,
         cc_version: None,
+        duration_ms: None,
     }
 }
 
@@ -77,10 +78,10 @@ fn test_hud_summary_rate_idle_after_inactive() {
 fn test_hud_summary_six_metrics_and_real_token_rate() {
     let mut store = Store::open_in_memory().unwrap();
     let now_ms = 1_700_000_010_000;
-
-    // 活跃记录：10 秒前产生，包含 800 输入、200 输出、1000 缓存读取，模型为 claude-sonnet
+    // 活跃记录：10 秒前产生，耗时 5000ms（5秒），输出 200，速率 = 200 / 5 = 40 tokens/s
     let mut r = sample_record("msg_active", now_ms - 10_000, (800, 200, 1000, 0));
     r.model = "claude-sonnet".to_string();
+    r.duration_ms = Some(5000);
     store.upsert_records(&[r]).unwrap();
 
     let summary = hud_summary_at(&store, false, now_ms).unwrap();
@@ -91,10 +92,115 @@ fn test_hud_summary_six_metrics_and_real_token_rate() {
     assert_eq!(summary.output_tokens, 200);
     // 缓存率：1000 / (800 + 1000) = 55.55%
     assert!((summary.cache_rate - 55.55).abs() < 0.1);
-    // 纯输出生成速率 (tokens/s)：200 / 10s = 20 tokens/s（不再是上千的 K/s）
-    assert!((summary.current_rate - 20.0).abs() < 1.0);
+    // 纯输出生成速率 (tokens/s)：200 / 5.0 = 40 tokens/s
+    assert!((summary.current_rate - 40.0).abs() < 1e-4);
+    assert_eq!(summary.active_sessions.len(), 1);
+    assert_eq!(summary.active_sessions[0].current_rate, 40.0);
 }
 
+#[test]
+fn test_hud_summary_two_rounds_rate_with_duration() {
+    let mut store = Store::open_in_memory().unwrap();
+    let now_ms = 1_700_000_020_000;
+
+    // 轮次 1：20 秒前，输出 300，耗时 6000ms
+    let mut r1 = sample_record("turn_1", now_ms - 20_000, (1000, 300, 0, 0));
+    r1.session_id = "session_rate".to_string();
+    r1.duration_ms = Some(6000);
+
+    // 轮次 2：10 秒前，输出 200，耗时 4000ms
+    let mut r2 = sample_record("turn_2", now_ms - 10_000, (1000, 200, 0, 0));
+    r2.session_id = "session_rate".to_string();
+    r2.duration_ms = Some(4000);
+
+    store.upsert_records(&[r1, r2]).unwrap();
+
+    let summary = hud_summary_at(&store, false, now_ms).unwrap();
+    // 最近 2 轮总输出 = 300 + 200 = 500
+    // 最近 2 轮总耗时 = 6s + 4s = 10s
+    // 速率 = 500 / 10 = 50 tokens/s
+    assert_eq!(summary.output_tokens, 500);
+    assert!((summary.current_rate - 50.0).abs() < 1e-4);
+}
+
+#[test]
+fn test_hud_summary_two_rounds_rate_ts_diff_fallback() {
+    let mut store = Store::open_in_memory().unwrap();
+    let now_ms = 1_700_000_030_000;
+
+    // 轮次 1：25 秒前，输出 400，无精确耗时
+    let mut r1 = sample_record("fallback_1", now_ms - 25_000, (1000, 400, 0, 0));
+    r1.session_id = "session_diff".to_string();
+    r1.duration_ms = None;
+
+    // 轮次 2：15 秒前（时间差 10 秒），输出 200，无精确耗时
+    let mut r2 = sample_record("fallback_2", now_ms - 15_000, (1000, 200, 0, 0));
+    r2.session_id = "session_diff".to_string();
+    r2.duration_ms = None;
+
+    store.upsert_records(&[r1, r2]).unwrap();
+
+    let summary = hud_summary_at(&store, false, now_ms).unwrap();
+    // 最近 2 轮总输出 = 400 + 200 = 600
+    // 时间差 = 25s - 15s = 10s (<= 120s 窗口)
+    // 速率 = 600 / 10 = 60 tokens/s
+    assert!((summary.current_rate - 60.0).abs() < 1e-4);
+}
+
+#[test]
+fn test_hud_summary_multi_sessions_and_opacity_settings() {
+    let mut store = Store::open_in_memory().unwrap();
+    let now_ms = 1_700_000_050_000;
+
+    for i in 1..=4 {
+        let mut r = sample_record(
+            &format!("sess_rec_{i}"),
+            now_ms - (i * 5_000),
+            (500, 100 * i, 0, 0),
+        );
+        r.session_id = format!("sess_{i}");
+        r.model = format!("model_{i}");
+        r.duration_ms = Some(2000);
+        store.upsert_records(&[r]).unwrap();
+    }
+
+    // 请求 limit = 3
+    let summary = token_watcher_lib::core::agg::hud_summary_with_options_at(
+        &store,
+        false,
+        &["current_rate".to_string(), "session_total".to_string()],
+        3,
+        now_ms,
+    )
+    .unwrap();
+
+    assert_eq!(summary.active_sessions.len(), 3);
+    assert_eq!(summary.hud_active_sessions_count, 3);
+    assert_eq!(summary.active_sessions[0].session_id, "sess_1");
+    assert_eq!(summary.active_sessions[1].session_id, "sess_2");
+    assert_eq!(summary.active_sessions[2].session_id, "sess_3");
+
+    // AppSettings opacity 序列化与默认值
+    let dir = std::env::temp_dir().join(format!("tw_test_opacity_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+
+    let mut settings = AppSettings::default();
+    assert!((settings.capsule_opacity - 0.9).abs() < 1e-4);
+    assert!((settings.widget_opacity - 0.95).abs() < 1e-4);
+    assert_eq!(settings.hud_active_sessions_count, 3);
+
+    settings.capsule_opacity = 0.8;
+    settings.widget_opacity = 0.7;
+    settings.hud_active_sessions_count = 5;
+    settings.save(&path).unwrap();
+
+    let loaded = AppSettings::load(&path);
+    assert!((loaded.capsule_opacity - 0.8).abs() < 1e-4);
+    assert!((loaded.widget_opacity - 0.7).abs() < 1e-4);
+    assert_eq!(loaded.hud_active_sessions_count, 5);
+}
 #[test]
 fn test_app_settings_hud_fields_roundtrip() {
     let dir = std::env::temp_dir().join(format!("tw_test_settings_{}", std::process::id()));

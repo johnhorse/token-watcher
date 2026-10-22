@@ -51,6 +51,7 @@ fn rec(
         is_sidechain: false,
         cwd: Some("/Volumes/Data/projects/token-watcher".to_string()),
         cc_version: None,
+        duration_ms: None,
     }
 }
 

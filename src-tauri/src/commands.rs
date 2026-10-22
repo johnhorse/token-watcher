@@ -316,12 +316,22 @@ pub fn get_hud_summary(state: State<'_, AppState>) -> Result<crate::core::agg::H
         *guard = Some(store);
     }
     let store = guard.as_ref().expect("上面刚放入");
-    crate::core::agg::hud_summary(
+    let mut summary = match crate::core::agg::hud_summary_with_options_at(
         store,
         settings.hud_locked,
         &settings.effective_hud_metrics(),
-    )
-    .map_err(|e| e.to_string())
+        settings.hud_active_sessions_count,
+        crate::core::agg::now_ms(),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            *guard = None;
+            return Err(e.to_string());
+        }
+    };
+    summary.widget_opacity = settings.widget_opacity;
+    summary.hud_active_sessions_count = settings.hud_active_sessions_count;
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -428,10 +438,47 @@ pub fn set_hud_mode(
 }
 
 #[tauri::command]
+pub fn set_hud_opacity(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mode: String,
+    opacity: f64,
+) -> Result<f64, String> {
+    let clamped = opacity.clamp(0.5, 1.0);
+    let settings_path = crate::app_settings::path_for_db(&state.db_path);
+    let mut settings = crate::app_settings::AppSettings::load(&settings_path);
+    match mode.as_str() {
+        "capsule" => settings.capsule_opacity = clamped,
+        _ => settings.widget_opacity = clamped,
+    }
+    settings.save(&settings_path).map_err(|e| e.to_string())?;
+    crate::tray::sync_hud_menu_items(&app, &settings);
+    let _ = app.emit("hud-settings-changed", ());
+    let _ = app.emit("hud-updated", ());
+    Ok(clamped)
+}
+
+#[tauri::command]
+pub fn set_hud_active_sessions_count(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    count: usize,
+) -> Result<usize, String> {
+    let clamped = count.clamp(1, 5);
+    let settings_path = crate::app_settings::path_for_db(&state.db_path);
+    let mut settings = crate::app_settings::AppSettings::load(&settings_path);
+    settings.hud_active_sessions_count = clamped;
+    settings.save(&settings_path).map_err(|e| e.to_string())?;
+    crate::tray::sync_hud_menu_items(&app, &settings);
+    let _ = app.emit("hud-settings-changed", ());
+    let _ = app.emit("hud-updated", ());
+    Ok(clamped)
+}
+
+#[tauri::command]
 pub async fn check_update(state: State<'_, AppState>) -> Result<crate::update::UpdateInfo, String> {
     state.updater.check().await
 }
-
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
     let trimmed = url.trim();

@@ -32,8 +32,8 @@ pub struct UsageRecord {
     pub is_sidechain: bool,
     pub cwd: Option<String>,
     pub cc_version: Option<String>,
+    pub duration_ms: Option<i64>,
 }
-
 impl UsageRecord {
     pub fn total_tokens(&self) -> i64 {
         self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_creation_tokens
@@ -41,6 +41,7 @@ impl UsageRecord {
 }
 
 /// 行级三态
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedLine {
     /// 完整行：成功映射出一条用量记录
@@ -144,6 +145,7 @@ pub fn parse_line(line: &[u8]) -> ParsedLine {
             .get("version")
             .and_then(Value::as_str)
             .map(str::to_string),
+        duration_ms: None,
     })
 }
 
@@ -508,6 +510,7 @@ pub fn parse_codex_line(line: &[u8], state: &mut CodexFileState) -> ParsedLine {
                 is_sidechain: false,
                 cwd,
                 cc_version,
+                duration_ms: None,
             })
         }
         _ => ParsedLine::Ignored,
@@ -678,6 +681,7 @@ pub fn parse_cline_roo_entries(
             is_sidechain: false,
             cwd: None,
             cc_version: None,
+            duration_ms: None,
         });
     }
 
@@ -777,9 +781,9 @@ pub fn parse_aider_line(line: &[u8], tracker: &mut AiderSessionTracker) -> Parse
         is_sidechain: false,
         cwd: None,
         cc_version: None,
+        duration_ms: None,
     })
 }
-
 /// 解析 omp 的项目 JSONL 会话单行
 pub fn parse_omp_line(line: &[u8], session_id: &str, cwd: Option<&str>) -> ParsedLine {
     let line = trim_bytes(line);
@@ -848,9 +852,9 @@ pub fn parse_omp_line(line: &[u8], session_id: &str, cwd: Option<&str>) -> Parse
         is_sidechain: false,
         cwd: cwd.map(str::to_string),
         cc_version: None,
+        duration_ms: None,
     })
 }
-
 /// 解析 OpenCode 消息表的一行记录
 pub fn parse_opencode_message(
     msg_id: &str,
@@ -889,6 +893,14 @@ pub fn parse_opencode_message(
         .and_then(Value::as_str)
         .unwrap_or("opencode-model")
         .to_string();
+    let duration_ms = obj.get("time").and_then(Value::as_object).and_then(|t| {
+        let created = t.get("created").and_then(Value::as_i64);
+        let completed = t.get("completed").and_then(Value::as_i64);
+        match (created, completed) {
+            (Some(c), Some(comp)) => Some((comp - c).max(0)),
+            _ => None,
+        }
+    });
 
     let cwd = obj
         .get("path")
@@ -912,9 +924,9 @@ pub fn parse_opencode_message(
         is_sidechain: false,
         cwd,
         cc_version: None,
+        duration_ms,
     })
 }
-
 /// 解析 Continue.dev 会话 JSON 记录
 pub fn parse_continue_session(
     file_session_id: &str,
@@ -1001,6 +1013,7 @@ pub fn parse_continue_session(
             is_sidechain: false,
             cwd: None,
             cc_version: None,
+            duration_ms: None,
         });
     }
 
