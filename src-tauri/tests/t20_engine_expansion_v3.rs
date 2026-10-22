@@ -55,20 +55,30 @@ fn test_cp1_antigravity_protobuf_extraction_and_ingest() {
     );
 
     // 1. 直读解析测试
-    let (records, max_idx) = parse_antigravity_db(fixture_path, -1).expect("解析 Antigravity DB 成功");
+    let (records, max_idx) =
+        parse_antigravity_db(fixture_path, -1).expect("解析 Antigravity DB 成功");
     assert_eq!(records.len(), 5, "应成功解出 5 条用量记录");
     assert_eq!(max_idx, 4, "max_idx 应为 4");
 
     // 验证第 1 条无缓存记录 (Record 0)
     let r0 = &records[0];
-    assert_eq!(r0.record_id, "antigravity:f269529e-e7aa-462e-8d46-f83d3b9d6f31:0");
-    assert_eq!(r0.session_id, "antigravity:f269529e-e7aa-462e-8d46-f83d3b9d6f31");
+    assert_eq!(
+        r0.record_id,
+        "antigravity:f269529e-e7aa-462e-8d46-f83d3b9d6f31:0"
+    );
+    assert_eq!(
+        r0.session_id,
+        "antigravity:f269529e-e7aa-462e-8d46-f83d3b9d6f31"
+    );
     assert_eq!(r0.input_tokens, 22985);
     assert_eq!(r0.output_tokens, 522);
     assert_eq!(r0.cache_read_tokens, 0);
     assert_eq!(r0.thoughts_tokens, 463, "thoughts_tokens 应精准解析出 463");
     assert_eq!(r0.model, "gemini-3.8-flash");
-    assert_eq!(r0.timestamp_ms, 1789717583428, "时间戳应从 steps.metadata 正确提取");
+    assert_eq!(
+        r0.timestamp_ms, 1789717583428,
+        "时间戳应从 steps.metadata 正确提取"
+    );
 
     // 验证带缓存与真实耗时的记录 (Record 2)
     let r2 = &records[2];
@@ -76,7 +86,11 @@ fn test_cp1_antigravity_protobuf_extraction_and_ingest() {
     assert_eq!(r2.output_tokens, 93);
     assert_eq!(r2.thoughts_tokens, 45);
     assert_eq!(r2.cache_read_tokens, 20370);
-    assert_eq!(r2.duration_ms, Some(24617), "单轮耗时应从 steps.metadata 计算出 24617ms");
+    assert_eq!(
+        r2.duration_ms,
+        Some(24617),
+        "单轮耗时应从 steps.metadata 计算出 24617ms"
+    );
 
     // 2. 增量摄取与 Checkpoint 幂等性测试
     let temp = TempDir::new("antigravity-ingest");
@@ -110,7 +124,10 @@ fn test_cp2_zcode_d24_saturating_sub_and_ingest() {
         ParsedLine::Record(r) => r,
         other => panic!("预期为 Record，实际得到: {:?}", other),
     };
-    assert_eq!(r1.input_tokens, 12735, "严格应用 D24: 35839 - 23104 = 12735");
+    assert_eq!(
+        r1.input_tokens, 12735,
+        "严格应用 D24: 35839 - 23104 = 12735"
+    );
     assert_eq!(r1.output_tokens, 178);
     assert_eq!(r1.cache_read_tokens, 23104);
     assert_eq!(r1.duration_ms, Some(11140), "原生毫秒耗时应为 11140ms");
@@ -310,9 +327,17 @@ fn test_qoder_and_workbuddy_fixtures_ingest() {
     assert!(workbuddy_fixture.exists());
 
     assert_eq!(detect_file_kind(qoder_fixture, b""), FileEngineKind::Qoder);
-    assert_eq!(detect_file_kind(workbuddy_fixture, b""), FileEngineKind::WorkBuddy);
+    assert_eq!(
+        detect_file_kind(workbuddy_fixture, b""),
+        FileEngineKind::WorkBuddy
+    );
 
-    let qd_line = fs::read_to_string(qoder_fixture).unwrap().lines().next().unwrap().to_string();
+    let qd_line = fs::read_to_string(qoder_fixture)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .to_string();
     match parse_qoder_line(qd_line.as_bytes(), "test-qd") {
         ParsedLine::Record(r) => {
             assert_eq!(r.model, "qwen-2.5-coder-32b");
@@ -321,7 +346,12 @@ fn test_qoder_and_workbuddy_fixtures_ingest() {
         other => panic!("预期 Record，得到 {:?}", other),
     }
 
-    let wb_line = fs::read_to_string(workbuddy_fixture).unwrap().lines().next().unwrap().to_string();
+    let wb_line = fs::read_to_string(workbuddy_fixture)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .to_string();
     match parse_workbuddy_line(wb_line.as_bytes(), "test-wb") {
         ParsedLine::Record(r) => {
             assert_eq!(r.model, "hunyuan-code");
@@ -386,7 +416,10 @@ fn test_ec2_zcode_dirty_data_saturating_sub() {
     let res = parse_zcode_line(dirty_json.as_bytes(), "dirty-sess");
     match res {
         ParsedLine::Record(r) => {
-            assert_eq!(r.input_tokens, 0, "saturating_sub 应保底为 0，防止无符号整数下溢");
+            assert_eq!(
+                r.input_tokens, 0,
+                "saturating_sub 应保底为 0，防止无符号整数下溢"
+            );
             assert_eq!(r.output_tokens, 50);
             assert_eq!(r.cache_read_tokens, 500);
         }
@@ -406,7 +439,10 @@ fn test_ec3_thinking_iceberg_computation_and_zero_division() {
     // 1. 空数据库或 output_tokens == 0: thinking_share 应为 None，绝不产生 NaN 或除以零
     let dash_empty =
         dashboard_at_with_prices_and_engine(&store, Range::All, now, None, None).unwrap();
-    assert_eq!(dash_empty.thinking_share, None, "空数据库 thinking_share 应为 None");
+    assert_eq!(
+        dash_empty.thinking_share, None,
+        "空数据库 thinking_share 应为 None"
+    );
     assert_eq!(dash_empty.thoughts_tokens, 0);
 
     // 2. 插入仅无思考链记录 (output > 0, thoughts == 0)
@@ -430,7 +466,10 @@ fn test_ec3_thinking_iceberg_computation_and_zero_division() {
 
     let dash_plain =
         dashboard_at_with_prices_and_engine(&store, Range::All, now, None, None).unwrap();
-    assert_eq!(dash_plain.thinking_share, None, "无思考 Token 时 thinking_share 应为 None");
+    assert_eq!(
+        dash_plain.thinking_share, None,
+        "无思考 Token 时 thinking_share 应为 None"
+    );
     assert_eq!(dash_plain.thoughts_tokens, 0);
 
     // 3. 插入 Antigravity 记录：500 output, 400 thoughts
@@ -464,7 +503,11 @@ fn test_ec3_thinking_iceberg_computation_and_zero_division() {
             .unwrap();
     assert_eq!(dash_ag.engine.as_deref(), Some("antigravity"));
     assert_eq!(dash_ag.thoughts_tokens, 400);
-    assert_eq!(dash_ag.thinking_share, Some(0.8), "Gemini 背后深层思考占比应达 80%");
+    assert_eq!(
+        dash_ag.thinking_share,
+        Some(0.8),
+        "Gemini 背后深层思考占比应达 80%"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -561,11 +604,26 @@ fn test_all_five_engines_slicing_and_detection() {
 
     store.upsert_records(&records).unwrap();
 
-    assert_eq!(detect_engine(&records[0].record_id, &records[0].entrypoint), "claude");
-    assert_eq!(detect_engine(&records[1].record_id, &records[1].entrypoint), "antigravity");
-    assert_eq!(detect_engine(&records[2].record_id, &records[2].entrypoint), "zcode");
-    assert_eq!(detect_engine(&records[3].record_id, &records[3].entrypoint), "qoder");
-    assert_eq!(detect_engine(&records[4].record_id, &records[4].entrypoint), "workbuddy");
+    assert_eq!(
+        detect_engine(&records[0].record_id, &records[0].entrypoint),
+        "claude"
+    );
+    assert_eq!(
+        detect_engine(&records[1].record_id, &records[1].entrypoint),
+        "antigravity"
+    );
+    assert_eq!(
+        detect_engine(&records[2].record_id, &records[2].entrypoint),
+        "zcode"
+    );
+    assert_eq!(
+        detect_engine(&records[3].record_id, &records[3].entrypoint),
+        "qoder"
+    );
+    assert_eq!(
+        detect_engine(&records[4].record_id, &records[4].entrypoint),
+        "workbuddy"
+    );
     // 验证 available_engines_between 统计
     let available = available_engines_between(&store, now - 10000, now).unwrap();
     let engine_names: Vec<&str> = available.iter().map(|e| e.engine.as_str()).collect();

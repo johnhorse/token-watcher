@@ -133,8 +133,14 @@ fn active_session_selection_uses_latest_record() {
         (10 + 1) + (20 + 2) + (5 + 3) + (7 + 7),
         "状态栏始终聚合今日全局汇总，并行会话均计入"
     );
-    assert_eq!(tray_metric_at(&store, TrayMetric::Input, now).unwrap(), 10 + 20 + 5 + 7);
-    assert_eq!(tray_metric_at(&store, TrayMetric::Output, now).unwrap(), 1 + 2 + 3 + 7);
+    assert_eq!(
+        tray_metric_at(&store, TrayMetric::Input, now).unwrap(),
+        10 + 20 + 5 + 7
+    );
+    assert_eq!(
+        tray_metric_at(&store, TrayMetric::Output, now).unwrap(),
+        1 + 2 + 3 + 7
+    );
     assert_eq!(
         tray_metric_at(&store, TrayMetric::CacheRead, now).unwrap(),
         0

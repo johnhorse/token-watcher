@@ -690,19 +690,31 @@ mod tests {
             FileEngineKind::ClaudeCode
         );
         assert_eq!(
-            detect_file_kind(Path::new("/Users/u/.gemini/antigravity/conversations/conv.db"), b""),
+            detect_file_kind(
+                Path::new("/Users/u/.gemini/antigravity/conversations/conv.db"),
+                b""
+            ),
             FileEngineKind::Antigravity
         );
         assert_eq!(
-            detect_file_kind(Path::new("/Users/u/.zcode/cli/rollout/model-io-session_123.jsonl"), b""),
+            detect_file_kind(
+                Path::new("/Users/u/.zcode/cli/rollout/model-io-session_123.jsonl"),
+                b""
+            ),
             FileEngineKind::ZCode
         );
         assert_eq!(
-            detect_file_kind(Path::new("/Users/u/.qoder/projects/demo/session.jsonl"), b""),
+            detect_file_kind(
+                Path::new("/Users/u/.qoder/projects/demo/session.jsonl"),
+                b""
+            ),
             FileEngineKind::Qoder
         );
         assert_eq!(
-            detect_file_kind(Path::new("/Users/u/.codebuddy/projects/demo/session.jsonl"), b""),
+            detect_file_kind(
+                Path::new("/Users/u/.codebuddy/projects/demo/session.jsonl"),
+                b""
+            ),
             FileEngineKind::WorkBuddy
         );
         // 确保包含引擎名称的普通 Claude 项目目录绝不被误判

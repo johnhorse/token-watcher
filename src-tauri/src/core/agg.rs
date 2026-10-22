@@ -18,7 +18,7 @@
 use super::pricing::{PriceTable, TokenCost};
 use super::store::{Store, Totals};
 use super::CoreError;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 /// 激活会话判定窗口（5 分钟）。
 /// 与 `attr::GRACE_MS` 当前同值但语义独立：两者同属 OQ4 的可调旋钮。
@@ -411,7 +411,9 @@ pub fn sql_engine_where(engine: Option<&str>) -> &'static str {
         Some("opencode") => " AND (record_id LIKE 'opencode:%' OR entrypoint = 'opencode')",
         Some("continue") => " AND (record_id LIKE 'continue:%' OR entrypoint = 'continue')",
         Some("omp") => " AND (record_id LIKE 'omp:%' OR entrypoint = 'omp')",
-        Some("antigravity") => " AND (record_id LIKE 'antigravity:%' OR entrypoint = 'antigravity')",
+        Some("antigravity") => {
+            " AND (record_id LIKE 'antigravity:%' OR entrypoint = 'antigravity')"
+        }
         Some("zcode") => " AND (record_id LIKE 'zcode:%' OR entrypoint = 'zcode')",
         Some("qoder") => " AND (record_id LIKE 'qoder:%' OR entrypoint = 'qoder')",
         Some("workbuddy") => " AND (record_id LIKE 'workbuddy:%' OR entrypoint = 'workbuddy')",
@@ -466,7 +468,9 @@ pub fn sql_engine_where_alias(engine: Option<&str>, alias: &str) -> String {
             format!(" AND ({alias}.record_id LIKE 'qoder:%' OR {alias}.entrypoint = 'qoder')")
         }
         Some("workbuddy") => {
-            format!(" AND ({alias}.record_id LIKE 'workbuddy:%' OR {alias}.entrypoint = 'workbuddy')")
+            format!(
+                " AND ({alias}.record_id LIKE 'workbuddy:%' OR {alias}.entrypoint = 'workbuddy')"
+            )
         }
         Some("claude") => {
             format!(

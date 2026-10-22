@@ -294,8 +294,20 @@ fn tray_metric_always_shows_today_all_summary_data() {
 
     // 无论 sess-1 是否在 5 分钟活跃窗口内，状态栏指标始终为全天会话汇总：
     // Total = (200 + 300) + (1000 + 2000 + 500) = 4000
-    assert_eq!(tray_metric_at(&store, TrayMetric::Total, now).unwrap(), 4000);
-    assert_eq!(tray_metric_at(&store, TrayMetric::Input, now).unwrap(), 1200);
-    assert_eq!(tray_metric_at(&store, TrayMetric::Output, now).unwrap(), 2300);
-    assert_eq!(tray_metric_at(&store, TrayMetric::CacheRead, now).unwrap(), 500);
+    assert_eq!(
+        tray_metric_at(&store, TrayMetric::Total, now).unwrap(),
+        4000
+    );
+    assert_eq!(
+        tray_metric_at(&store, TrayMetric::Input, now).unwrap(),
+        1200
+    );
+    assert_eq!(
+        tray_metric_at(&store, TrayMetric::Output, now).unwrap(),
+        2300
+    );
+    assert_eq!(
+        tray_metric_at(&store, TrayMetric::CacheRead, now).unwrap(),
+        500
+    );
 }

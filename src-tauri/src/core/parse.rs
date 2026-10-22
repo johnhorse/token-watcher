@@ -1123,9 +1123,11 @@ fn read_antigravity_records_from_conn(
     previous_idx: i64,
 ) -> Result<(Vec<UsageRecord>, i64), CoreError> {
     let trajectory_id: String = conn
-        .query_row("SELECT trajectory_id FROM trajectory_meta LIMIT 1", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT trajectory_id FROM trajectory_meta LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or_else(|_| {
             let stem = db_path
                 .file_stem()
@@ -1284,8 +1286,8 @@ fn read_antigravity_records_from_conn(
             duration_ms,
             thoughts_tokens: thoughts,
         });
-        }
-        Ok((records, max_idx))
+    }
+    Ok((records, max_idx))
 }
 
 /// 解析 Google Antigravity 的 SQLite 对话库
@@ -1370,8 +1372,14 @@ pub fn parse_zcode_line(line: &[u8], default_session_id: &str) -> ParsedLine {
         return ParsedLine::Bad;
     };
 
-    let cache_read = usage.get("cacheReadTokens").and_then(Value::as_i64).unwrap_or(0);
-    let cache_write = usage.get("cacheWriteTokens").and_then(Value::as_i64).unwrap_or(0);
+    let cache_read = usage
+        .get("cacheReadTokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let cache_write = usage
+        .get("cacheWriteTokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
 
     // D24 防双计：扣减包含式缓存，结合 saturating_sub 与 max(0) 防下溢
     let net_input = input_tokens
@@ -1413,14 +1421,22 @@ pub fn parse_zcode_line(line: &[u8], default_session_id: &str) -> ParsedLine {
     let record_id = if !req_id.is_empty() {
         format!("zcode:{}:{}:{}", session_id, req_id, attempt)
     } else {
-        format!("zcode:{}:{}:{}", session_id, timestamp_ms, hash_prefix_8(line))
+        format!(
+            "zcode:{}:{}:{}",
+            session_id,
+            timestamp_ms,
+            hash_prefix_8(line)
+        )
     };
 
     let model = obj
         .get("model")
         .and_then(|m| {
             if let Some(m_obj) = m.as_object() {
-                m_obj.get("modelId").and_then(Value::as_str).map(str::to_string)
+                m_obj
+                    .get("modelId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
             } else {
                 m.as_str().map(str::to_string)
             }
@@ -1494,10 +1510,7 @@ pub fn parse_qoder_line(line: &[u8], default_session_id: &str) -> ParsedLine {
     .or_else(|| token_value(usage.get("reasoning_tokens")))
     .unwrap_or(0);
 
-    let msg_id = message
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| "");
+    let msg_id = message.get("id").and_then(Value::as_str).unwrap_or("");
 
     let session_id = obj
         .get("session_id")
@@ -1514,7 +1527,12 @@ pub fn parse_qoder_line(line: &[u8], default_session_id: &str) -> ParsedLine {
     let record_id = if !msg_id.is_empty() {
         format!("qoder:{}:{}", session_id, msg_id)
     } else {
-        format!("qoder:{}:{}:{}", session_id, timestamp_ms, hash_prefix_8(line))
+        format!(
+            "qoder:{}:{}:{}",
+            session_id,
+            timestamp_ms,
+            hash_prefix_8(line)
+        )
     };
 
     let model = message
@@ -1592,7 +1610,7 @@ pub fn parse_workbuddy_line(line: &[u8], default_session_id: &str) -> ParsedLine
         .or_else(|| obj.get("messageId"))
         .or_else(|| obj.get("id"))
         .and_then(Value::as_str)
-        .unwrap_or_else(|| "");
+        .unwrap_or("");
 
     let session_id = obj
         .get("session_id")
@@ -1626,7 +1644,12 @@ pub fn parse_workbuddy_line(line: &[u8], default_session_id: &str) -> ParsedLine
     let record_id = if !msg_id.is_empty() {
         format!("workbuddy:{}:{}", session_id, msg_id)
     } else {
-        format!("workbuddy:{}:{}:{}", session_id, timestamp_ms, hash_prefix_8(line))
+        format!(
+            "workbuddy:{}:{}:{}",
+            session_id,
+            timestamp_ms,
+            hash_prefix_8(line)
+        )
     };
 
     let model = obj
@@ -2269,7 +2292,9 @@ mod tests {
     #[test]
     fn test_protobuf_reader_huge_length_no_overflow_panic() {
         // Wire type 2 with length varint near u64::MAX
-        let buf = [0x12, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x01];
+        let buf = [
+            0x12, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x01,
+        ];
         let mut reader = ProtobufReader::new(&buf);
         assert_eq!(reader.next_field(), None);
     }
@@ -2286,7 +2311,10 @@ mod tests {
 
         // 验证 Record 0
         let r0 = &records[0];
-        assert_eq!(r0.record_id, "antigravity:f269529e-e7aa-462e-8d46-f83d3b9d6f31:0");
+        assert_eq!(
+            r0.record_id,
+            "antigravity:f269529e-e7aa-462e-8d46-f83d3b9d6f31:0"
+        );
         assert_eq!(r0.input_tokens, 22985);
         assert_eq!(r0.output_tokens, 522);
         assert_eq!(r0.thoughts_tokens, 463);

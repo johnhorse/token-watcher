@@ -506,7 +506,10 @@ impl<S: EventSink> DataEngine<S> {
                 }
             }
             if paths.antigravity_conversations_root.exists() {
-                let _ = w.watch(&paths.antigravity_conversations_root, RecursiveMode::Recursive);
+                let _ = w.watch(
+                    &paths.antigravity_conversations_root,
+                    RecursiveMode::Recursive,
+                );
             }
             if paths.zcode_root.exists() {
                 let _ = w.watch(&paths.zcode_root, RecursiveMode::Recursive);
@@ -937,7 +940,9 @@ impl<S: EventSink> DataEngine<S> {
                 {
                     self.pending_files
                         .insert(self.paths.opencode_db_path.clone());
-                } else if self.under_antigravity(path) && path.to_string_lossy().ends_with(".db-wal") {
+                } else if self.under_antigravity(path)
+                    && path.to_string_lossy().ends_with(".db-wal")
+                {
                     let db_str = path.to_string_lossy().trim_end_matches("-wal").to_string();
                     let db_path = std::path::PathBuf::from(db_str);
                     if db_path.is_file() {
