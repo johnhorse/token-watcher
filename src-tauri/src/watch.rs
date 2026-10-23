@@ -29,6 +29,7 @@ use crate::core::attr::{self, ApplyOutcome, SettingsSnapshot};
 use crate::core::ingest::{self, ScanStats};
 use crate::core::store::Store;
 use crate::core::CoreError;
+use crate::log;
 use crate::tray::TrayCommand;
 
 /// 增量事件聚合窗口（OQ4：与 5 分钟宽限/激活阈值一并按体感调）
@@ -86,15 +87,34 @@ struct SqliteFingerprint {
     shm: Option<(i64, i64)>,
 }
 
+/// stat 结果：区分 ENOENT（进 skip-set，避免每轮 poll 重复报错）与其他错误
+enum SourceStat {
+    Found((i64, i64)),
+    Missing,
+    Error(std::io::Error),
+}
+
+fn stat_source(path: &Path) -> SourceStat {
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            let mtime_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or(0);
+            SourceStat::Found((mtime_ms, metadata.len().min(i64::MAX as u64) as i64))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SourceStat::Missing,
+        Err(error) => SourceStat::Error(error),
+    }
+}
+
 fn file_fingerprint(path: &Path) -> Option<(i64, i64)> {
-    let metadata = fs::metadata(path).ok()?;
-    let mtime_ms = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0);
-    Some((mtime_ms, metadata.len().min(i64::MAX as u64) as i64))
+    match stat_source(path) {
+        SourceStat::Found(fingerprint) => Some(fingerprint),
+        SourceStat::Missing | SourceStat::Error(_) => None,
+    }
 }
 
 fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
@@ -500,6 +520,8 @@ pub struct DataEngine<S: EventSink> {
     force_reads: HashSet<PathBuf>,
     /// R9：⑤ 每根轮转续扫游标
     root_scan_cursors: HashMap<RootKind, usize>,
+    /// stat ENOENT / 不可读的源（内存 skip-set：只在状态变化时记日志）
+    missing_sources: HashSet<PathBuf>,
 }
 
 impl<S: EventSink> DataEngine<S> {
@@ -705,6 +727,7 @@ impl<S: EventSink> DataEngine<S> {
             config_mtimes: HashMap::new(),
             force_reads: HashSet::new(),
             root_scan_cursors: HashMap::new(),
+            missing_sources: HashSet::new(),
         };
         engine.apply_initial_settings();
         engine.prime_config_mtimes();
@@ -930,6 +953,10 @@ impl<S: EventSink> DataEngine<S> {
             "[token-watcher] 首扫完成: files={} failed={} records={} bad_lines={} phase={phase}",
             stats.files_scanned, stats.files_failed, stats.records, stats.bad_lines
         );
+        log::info(format!(
+            "scan: done files={} failed={} records={} bad_lines={} phase={phase}",
+            stats.files_scanned, stats.files_failed, stats.records, stats.bad_lines
+        ));
         self.publish_health_if_changed();
     }
 
@@ -937,7 +964,10 @@ impl<S: EventSink> DataEngine<S> {
     pub fn handle(&mut self, msg: Message) {
         match msg {
             Message::Fs(event) => self.collect_event(event),
-            Message::FsError(e) => eprintln!("[token-watcher] watcher 错误: {e}"),
+            Message::FsError(e) => {
+                log::info(format!("watcher error: {e}"));
+                eprintln!("[token-watcher] watcher 错误: {e}");
+            }
             Message::WindowShown => self.on_window_shown(),
             Message::ProxyAttribution {
                 message_id,
@@ -1031,40 +1061,70 @@ impl<S: EventSink> DataEngine<S> {
     /// 一轮兜底检查矩阵（P3）：①~④ 每轮必跑，⑤ 到点才跑；有新工作立即落库。
     fn poll_tick(&mut self, now: Instant) {
         let active = self.is_active(now);
-        self.poll_jsonl_sources();
-        self.poll_sqlite_sources();
-        self.poll_record_sources();
-        self.poll_config_sources();
+        let (jsonl_checked, jsonl_hits) = self.poll_jsonl_sources();
+        let (sqlite_checked, sqlite_hits) = self.poll_sqlite_sources();
+        let (record_checked, record_hits) = self.poll_record_sources();
+        let config_dirty = self.poll_config_sources();
+        let mut roots = 0usize;
+        let mut root_hits = 0usize;
         if now >= self.next_root_scan_at {
             for kind in ROOT_KINDS {
-                self.root_light_scan(kind);
+                roots += 1;
+                root_hits += self.root_light_scan(kind);
             }
             self.next_root_scan_at = now + POLL_ROOT_SCAN;
         }
         // 活跃期 3s 快档；空闲期 60s 慢扫同一矩阵（含⑤）
         self.next_poll_at = now + if active { POLL_FAST } else { POLL_IDLE };
+        // 每轮一行：各检查项 stat 数 / 命中入队数
+        log::info(format!(
+            "poll active={active} jsonl={jsonl_checked}/{jsonl_hits} sqlite={sqlite_checked}/{sqlite_hits} record={record_checked}/{record_hits} config_dirty={config_dirty} roots={roots}/{root_hits}"
+        ));
         if self.has_pending_work() {
             self.flush();
         }
     }
 
     /// ① JSONL 源（含 aider analytics.jsonl）：stat size vs byte_offset 内存镜像
-    fn poll_jsonl_sources(&mut self) {
+    fn poll_jsonl_sources(&mut self) -> (usize, usize) {
         let mut hits = Vec::new();
+        let mut checked = 0usize;
+        let missing = &mut self.missing_sources;
         for (path, offset) in &self.jsonl_offsets {
-            if let Some((_, size)) = file_fingerprint(path) {
-                if size != *offset {
-                    hits.push(path.clone());
+            checked += 1;
+            match stat_source(path) {
+                SourceStat::Found((_, size)) => {
+                    if missing.remove(path) {
+                        log::info(format!("poll: source recovered path={}", path.display()));
+                    }
+                    if size != *offset {
+                        hits.push(path.clone());
+                    }
+                }
+                SourceStat::Missing => {
+                    if missing.insert(path.clone()) {
+                        log::info(format!("poll: source missing path={}", path.display()));
+                    }
+                }
+                SourceStat::Error(error) => {
+                    if missing.insert(path.clone()) {
+                        log::info(format!(
+                            "poll: source stat error path={} err={error}",
+                            path.display()
+                        ));
+                    }
                 }
             }
         }
+        let enqueued = hits.len();
         for path in hits {
             self.pending_files.insert(path);
         }
+        (checked, enqueued)
     }
 
     /// ② SQLite 源：主库 + WAL/SHM 指纹与内存基线比对，不匹配即强制重读（R1/R2）
-    fn poll_sqlite_sources(&mut self) {
+    fn poll_sqlite_sources(&mut self) -> (usize, usize) {
         let mut candidates = Vec::new();
         if self.paths.opencode_db_path.is_file() {
             candidates.push(self.paths.opencode_db_path.clone());
@@ -1077,8 +1137,20 @@ impl<S: EventSink> DataEngine<S> {
                 }
             }
         }
+        let mut checked = 0usize;
+        let mut enqueued = 0usize;
         for path in candidates {
+            checked += 1;
             let observed = sqlite_fingerprint(&path);
+            if observed.db.is_none() {
+                if self.missing_sources.insert(path.clone()) {
+                    log::info(format!("poll: sqlite missing path={}", path.display()));
+                }
+                continue;
+            }
+            if self.missing_sources.remove(&path) {
+                log::info(format!("poll: sqlite recovered path={}", path.display()));
+            }
             let mismatched = self
                 .sqlite_fingerprints
                 .get(&path)
@@ -1090,69 +1162,98 @@ impl<S: EventSink> DataEngine<S> {
             if mismatched {
                 self.force_reads.insert(path.clone());
                 self.pending_files.insert(path);
+                enqueued += 1;
             }
         }
+        (checked, enqueued)
     }
 
     /// ③ 记录数型源（Cline/Roo ui_messages.json、Continue *.json）：stat (mtime,size)
-    fn poll_record_sources(&mut self) {
+    fn poll_record_sources(&mut self) -> (usize, usize) {
         let mut hits = Vec::new();
+        let mut checked = 0usize;
+        let missing = &mut self.missing_sources;
         for (path, baseline) in &self.record_src_fingerprints {
-            if let Some(fingerprint) = file_fingerprint(path) {
-                if fingerprint != *baseline {
-                    hits.push(path.clone());
+            checked += 1;
+            match stat_source(path) {
+                SourceStat::Found(fingerprint) => {
+                    if missing.remove(path) {
+                        log::info(format!("poll: source recovered path={}", path.display()));
+                    }
+                    if fingerprint != *baseline {
+                        hits.push(path.clone());
+                    }
+                }
+                SourceStat::Missing => {
+                    if missing.insert(path.clone()) {
+                        log::info(format!("poll: source missing path={}", path.display()));
+                    }
+                }
+                SourceStat::Error(error) => {
+                    if missing.insert(path.clone()) {
+                        log::info(format!(
+                            "poll: source stat error path={} err={error}",
+                            path.display()
+                        ));
+                    }
                 }
             }
         }
+        let enqueued = hits.len();
         for path in hits {
             self.pending_files.insert(path);
         }
+        (checked, enqueued)
     }
 
     /// ④ settings.json / codex config.toml：只比对 mtime，不匹配置 dirty，
     /// 由下个 flush 走既有 apply_settings_from_disk（tick 内不读文件）
-    fn poll_config_sources(&mut self) {
+    fn poll_config_sources(&mut self) -> usize {
         let paths = [
             self.paths.settings_path.clone(),
             self.paths.codex_config_path.clone(),
         ];
+        let mut dirty = 0usize;
         for path in paths {
             let current = file_fingerprint(&path).map(|(mtime, _)| mtime);
             match self.config_mtimes.get(&path).copied() {
                 Some(previous) if previous == current => {}
                 Some(_) => {
-                    self.config_mtimes.insert(path, current);
+                    self.config_mtimes.insert(path.clone(), current);
                     self.settings_dirty = true;
+                    dirty += 1;
+                    log::info(format!("poll: config changed path={}", path.display()));
                 }
                 None => {
                     self.config_mtimes.insert(path, current);
                 }
             }
         }
+        dirty
     }
 
     /// ⑤ 单根有界轻扫（R9）：按源族枚举，单轮每根最多入队
     /// [`ROOT_SCAN_ENQUEUE_CAP`] 个；游标轮转让超上限的文件最终全部入账。
     /// 只发现「未知文件」——已知文件的增量由 ①/②/③ 的 stat 比对负责。
-    fn root_light_scan(&mut self, kind: RootKind) -> bool {
+    fn root_light_scan(&mut self, kind: RootKind) -> usize {
         let mut files = self.collect_root_candidates(kind);
         files.retain(|path| !self.is_known_source(path, kind));
         if files.is_empty() {
             self.root_scan_cursors.insert(kind, 0);
-            return false;
+            return 0;
         }
         files.sort();
         files.dedup();
         let len = files.len();
         let start = self.root_scan_cursors.get(&kind).copied().unwrap_or(0) % len;
         let take = len.min(ROOT_SCAN_ENQUEUE_CAP);
-        let mut added = false;
+        let mut added = 0usize;
         for index in 0..take {
             if self
                 .pending_files
                 .insert(files[(start + index) % len].clone())
             {
-                added = true;
+                added += 1;
             }
         }
         let next = if take >= len { 0 } else { (start + take) % len };
@@ -1262,12 +1363,19 @@ impl<S: EventSink> DataEngine<S> {
         self.batch_started = None;
         if self.has_pending_work() {
             let mut changed = false;
+            let settings_was = self.settings_dirty;
+            let full_catchup = self.needs_catchup;
 
             // settings 先于文件：同批次里切换后的记录应按新档案归因
             if self.settings_dirty {
                 self.settings_dirty = false;
                 match self.apply_settings_from_disk() {
-                    Ok(timeline_changed) => changed |= timeline_changed,
+                    Ok(timeline_changed) => {
+                        if timeline_changed {
+                            log::info("settings: timeline updated");
+                        }
+                        changed |= timeline_changed
+                    }
                     Err(()) => {
                         self.enter_readonly();
                         return;
@@ -1285,6 +1393,12 @@ impl<S: EventSink> DataEngine<S> {
             }
 
             let files: Vec<PathBuf> = self.pending_files.drain().collect();
+            log::info(format!(
+                "flush files={} settings={} catchup_full={}",
+                files.len(),
+                settings_was,
+                full_catchup
+            ));
             if files.is_empty() {
                 if changed {
                     self.emit_dirty();
@@ -1306,6 +1420,14 @@ impl<S: EventSink> DataEngine<S> {
                 match ingest::ingest_file_with_records_forced(&mut store, &path, force_read) {
                     Ok((stats, records)) => {
                         changed_rows += stats.changed;
+                        // 只记路径与计数（P1：不写消息内容 / token 明细）
+                        log::info(format!(
+                            "ingest path={} records={} changed={} truncated={}",
+                            path.display(),
+                            stats.records,
+                            stats.changed,
+                            stats.truncated
+                        ));
                         // 轮询内存基线（①/③）随 ingest 刷新
                         self.remember_source(&store, &path);
                         for record in &records {
@@ -1321,12 +1443,14 @@ impl<S: EventSink> DataEngine<S> {
                         // 原子 rename / 删除竞态导致的瞬时消失不计入 D17 跳过数
                         if path.exists() {
                             skipped += 1;
+                            log::info(format!("ingest: skipped path={}", path.display()));
                         }
                     }
                 }
             }
             self.store = Some(store);
             if let Some(e) = db_error {
+                log::info(format!("ingest: db error={e}"));
                 eprintln!("[token-watcher] 增量 ingest 数据库错误: {e}");
                 self.enter_readonly();
                 return;
@@ -1340,6 +1464,13 @@ impl<S: EventSink> DataEngine<S> {
                 changed = true;
                 self.last_activity = Instant::now();
             }
+            log::info(format!(
+                "flush done changed_rows={} changed={} pulses={} skipped={}",
+                changed_rows,
+                changed,
+                pulses.len(),
+                skipped
+            ));
             // usage-pulse：本次解析出的 Record 行逐条发（重复导入会重发，
             // UI 幂等累计可接受——契约的到达脉冲语义）
             for pulse in pulses {
@@ -1484,6 +1615,19 @@ impl<S: EventSink> DataEngine<S> {
             // R6：min(单事件去抖, 批次首项 + 2s)——持续事件流不得无限推迟首批落库
             let hard_deadline = self.batch_started.unwrap_or(now) + DEBOUNCE_MAX;
             self.debounce_deadline = Some((now + DEBOUNCE).min(hard_deadline));
+            // 事件判定（P1：只记路径与计数）
+            let first = event
+                .paths
+                .first()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            log::info(format!(
+                "event kind={:?} path={first} pending={} catchup={} settings={}",
+                event.kind,
+                self.pending_files.len(),
+                self.catchup_roots.len(),
+                self.settings_dirty
+            ));
         }
     }
 
@@ -2046,7 +2190,8 @@ impl<S: EventSink> DataEngine<S> {
     /// 返回是否需要 dashboard-dirty。
     fn quiet_scan(&mut self, only: Option<RootKind>) -> bool {
         if let Some(kind) = only {
-            self.root_light_scan(kind);
+            let enqueued = self.root_light_scan(kind);
+            log::info(format!("catchup root={kind:?} enqueued={enqueued}"));
             return false;
         }
         let Some(mut store) = self.store.take() else {
@@ -2068,6 +2213,7 @@ impl<S: EventSink> DataEngine<S> {
         .filter(|p| p.exists())
         .cloned()
         .collect();
+        let root_count = roots.len();
         let mut changed = false;
         for root in roots {
             match ingest::scan_dir(&mut store, &root) {
@@ -2134,6 +2280,7 @@ impl<S: EventSink> DataEngine<S> {
         }
         self.store = Some(store);
         self.publish_health_if_changed();
+        log::info(format!("quiet_scan roots={root_count} changed={changed}"));
         changed
     }
 
@@ -2224,6 +2371,7 @@ impl<S: EventSink> DataEngine<S> {
             Ok(store) => {
                 self.store = Some(store);
                 self.health.db_readonly = false;
+                log::info("db: reopened，补扫断档期间的变更");
                 eprintln!("[token-watcher] 数据库恢复，补扫断档期间的变更");
                 self.publish_health_if_changed();
                 let mut changed = false;
@@ -2256,6 +2404,7 @@ impl<S: EventSink> DataEngine<S> {
         self.catchup_roots.clear();
         self.force_reads.clear();
         if !self.health.db_readonly {
+            log::info("db: readonly (retry every 10s)");
             eprintln!("[token-watcher] 数据库不可写，进入只读降级（每 10s 重试）");
         }
         self.health.db_readonly = true;

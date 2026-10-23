@@ -17,6 +17,7 @@ pub mod app_settings;
 pub mod commands;
 pub mod core;
 pub mod hud;
+pub mod log;
 pub mod proxy;
 pub mod tray;
 pub mod update;
@@ -95,6 +96,16 @@ pub fn run() {
             // 托盘失败不阻塞数据管道：用断开通道降级，窗口仍可用。
             let settings_path = app_settings::path_for_db(&paths.db_path);
             let mut settings = AppSettings::load(&settings_path);
+
+            // v0.7.2 P1：滚动日志器（与 DB 同级目录；任何 IO 失败静默降级）
+            if let Some(dir) = paths.db_path.parent() {
+                log::init(dir.join("log"), settings.log_max_bytes, settings.log_keep);
+            }
+            log::info(format!(
+                "app: start version={} db={}",
+                env!("CARGO_PKG_VERSION"),
+                paths.db_path.display()
+            ));
 
             // 开机自启动同步：仅在系统状态与期望设置不一致时触发变更，避免每次启动重写 LaunchAgent plist 触发 macOS 通知
             {

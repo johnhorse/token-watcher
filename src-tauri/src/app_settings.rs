@@ -93,6 +93,16 @@ pub fn default_hud_metrics() -> Vec<String> {
 pub fn default_tray_metrics() -> Vec<TrayMetric> {
     vec![TrayMetric::Total]
 }
+
+/// v0.7.2 P1：滚动日志单文件上限（默认 2MB）
+pub fn default_log_max_bytes() -> u64 {
+    crate::log::DEFAULT_MAX_BYTES
+}
+
+/// v0.7.2 P1：滚动日志保留份数（含当前文件，默认 2）
+pub fn default_log_keep() -> usize {
+    crate::log::DEFAULT_KEEP
+}
 /// app 自身设置（未来字段一律给 serde 默认值，保证旧文件可读）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -134,6 +144,12 @@ pub struct AppSettings {
     /// HUD 激活会话最多展示条数（1/2/3/5，默认 3）
     #[serde(default = "default_hud_active_sessions_count")]
     pub hud_active_sessions_count: usize,
+    /// v0.7.2 P1：滚动日志单文件上限（字节，默认 2MB）
+    #[serde(default = "default_log_max_bytes")]
+    pub log_max_bytes: u64,
+    /// v0.7.2 P1：滚动日志保留份数（含当前文件，默认 2）
+    #[serde(default = "default_log_keep")]
+    pub log_keep: usize,
 }
 impl Default for AppSettings {
     fn default() -> Self {
@@ -155,6 +171,8 @@ impl Default for AppSettings {
             capsule_opacity: default_capsule_opacity(),
             widget_opacity: default_widget_opacity(),
             hud_active_sessions_count: default_hud_active_sessions_count(),
+            log_max_bytes: default_log_max_bytes(),
+            log_keep: default_log_keep(),
         }
     }
 }
@@ -219,6 +237,9 @@ impl AppSettings {
                     settings.widget_opacity = settings.widget_opacity.clamp(0.5, 1.0);
                     settings.hud_active_sessions_count =
                         settings.hud_active_sessions_count.clamp(1, 5);
+                    settings.log_max_bytes =
+                        settings.log_max_bytes.clamp(64 * 1024, 64 * 1024 * 1024);
+                    settings.log_keep = settings.log_keep.clamp(1, 5);
                     settings
                 }
                 Err(e) => {
