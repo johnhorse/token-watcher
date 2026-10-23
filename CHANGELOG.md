@@ -7,6 +7,24 @@
 
 ---
 
+## [0.7.2] - 2026-10-23
+
+### Added
+- **监测可靠性收尾（兜底轮询与自愈重扫）**：
+  - **兜底检查矩阵**：活跃期（最近 5 分钟有 fs 事件或新入库记录）每 3 秒对全部已知源做毫秒级 stat，引擎根轻扫独立 30 秒节拍；空闲期降为 60 秒整矩阵慢扫——fs 事件被吞也能自愈重读，主循环不再无限阻塞；
+  - **SQLite 源 WAL 感知**：OpenCode / Antigravity 的主库与 `-wal`/`-shm` 指纹仅存内存，WAL-only 写入可被检出并强制重读，绕过主库 `(mtime,size)` 相等短路；
+  - **监听根自身目录事件触发单根补扫**：FSEvents 溢出提示落点不再被丢弃，只补扫事件所属的根；单轮每根入队上限 200 条 + 轮转续扫游标，风暴期不阻塞数据线程；
+  - **滚动日志**：`~/.token-watcher/log/token-watcher.log`（默认 2MB × 2，可在 `settings.json` 用 `log_max_bytes` / `log_keep` 调整），事件判定、flush 批次、checkpoint 推进与轮询动作全部落盘（只记路径与计数）；
+  - **对账工具**：`scripts/audit.py` 快检各源未消费增量，`--deep` 对 omp 与 Claude Code 做行级对账。
+
+### Fixed
+- **持续事件流下去抖批次最大等待 2 秒**：并行会话 / 多 agent 风暴期不再无限推迟首批落库，「完成即达」延迟有上限；
+- **同数量原地更新仍通知 UI**：flush 的刷新判定改由 UPSERT 实际变更行数驱动，Cline/Roo 整文件重写但记录数不变时 HUD 照常刷新；
+- **OpenCode 增量游标含边界**：游标改为 `time_created >= checkpoint`，同毫秒并列行与事后补 usage 行不再被永久跳过（record_id UPSERT 幂等去重）。
+
+### 已知限制
+- `omp -p` print 模式不落盘、omp provider 或自写脚本直连 API 的用量对文件监测物理不可见；二者计划由 v0.8 计量代理（metering bridge）解决。
+
 ## [0.7.1] - 2026-10-23
 
 ### Fixed
