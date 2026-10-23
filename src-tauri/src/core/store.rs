@@ -445,7 +445,10 @@ impl Store {
     /// 批量 UPSERT 用量记录。同 record_id 后到者胜，绝不累加。
     /// 每 [`UPSERT_BATCH`] 条一个事务，避免长事务锁库与崩溃丢整批。
     /// 落库前按当前时间线物化归因（T2）：`profile_id` 为 NULL 即 Unknown。
-    pub fn upsert_records(&mut self, records: &[UsageRecord]) -> Result<(), CoreError> {
+    ///
+    /// 返回实际受影响的行数（插入 + 冲突更新）。v0.7.2 R7：flush 的 emit
+    /// 判定改由「changed > 0」驱动——整文件重写但记录数不变时也能通知 UI。
+    pub fn upsert_records(&mut self, records: &[UsageRecord]) -> Result<u64, CoreError> {
         // 时间线很小，每批加载一次内存查询即可；避免逐条 SQL 查询
         let timeline = self.load_timeline()?;
         let codex_profile_id: Option<i64> = self
@@ -461,6 +464,7 @@ impl Store {
                 |row| row.get(0),
             )
             .ok();
+        let mut changed = 0u64;
         for chunk in records.chunks(UPSERT_BATCH) {
             let tx = self.conn.transaction()?;
             {
@@ -510,11 +514,12 @@ impl Store {
                         r.duration_ms,
                         r.thoughts_tokens,
                     ])?;
+                    changed += 1;
                 }
             }
             tx.commit()?;
         }
-        Ok(())
+        Ok(changed)
     }
 
     pub fn get_checkpoint(&self, file_path: &str) -> Result<Option<Checkpoint>, CoreError> {

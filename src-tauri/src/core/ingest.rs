@@ -37,6 +37,8 @@ pub struct FileIngestStats {
     pub bad_lines: u64,
     /// 是否因截断/轮转从 0 重扫
     pub truncated: bool,
+    /// UPSERT 实际受影响的行数（v0.7.2 R7：flush 的 emit 判定改由它驱动）
+    pub changed: u64,
 }
 
 /// 一次目录扫描的汇总
@@ -249,6 +251,25 @@ pub fn ingest_file_with_records(
     store: &mut Store,
     path: &Path,
 ) -> Result<(FileIngestStats, Vec<UsageRecord>), CoreError> {
+    ingest_file_with_records_opts(store, path, false)
+}
+
+/// 同 [`ingest_file_with_records`]，`force_read` 强制重读 SQLite 源：
+/// 绕过 Antigravity 主库 (mtime,size) 相等短路（v0.7.2 R1）——WAL-only 写入
+/// 不改变主库 stat，不强制重读会看到「无变化」而空手而归。
+pub fn ingest_file_with_records_forced(
+    store: &mut Store,
+    path: &Path,
+    force_read: bool,
+) -> Result<(FileIngestStats, Vec<UsageRecord>), CoreError> {
+    ingest_file_with_records_opts(store, path, force_read)
+}
+
+fn ingest_file_with_records_opts(
+    store: &mut Store,
+    path: &Path,
+    force_read: bool,
+) -> Result<(FileIngestStats, Vec<UsageRecord>), CoreError> {
     let metadata = fs::metadata(path)?;
     let size = metadata.len().min(i64::MAX as u64) as i64;
     let mtime_ms = metadata
@@ -296,7 +317,7 @@ pub fn ingest_file_with_records(
             Ok(r) => r,
             Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
         };
-        store.upsert_records(&records)?;
+        let changed = store.upsert_records(&records)?;
         store.set_checkpoint(
             &key,
             Checkpoint {
@@ -314,6 +335,7 @@ pub fn ingest_file_with_records(
             records: new_records.len() as u64,
             bad_lines: 0,
             truncated: false,
+            changed,
         };
         return Ok((stats, new_records));
     }
@@ -331,8 +353,10 @@ pub fn ingest_file_with_records(
             Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
         };
         let _ = conn.execute_batch("PRAGMA query_only = ON;");
+        // v0.7.2 R5：游标含边界（>=）。同毫秒并列行与事后补 usage 行不再被
+        // 永久跳过；边界行重复读入由 record_id UPSERT 幂等兜底。
         let mut stmt = match conn.prepare(
-            "SELECT m.id, m.session_id, m.time_created, m.data FROM message m WHERE m.time_created > ? ORDER BY m.time_created ASC",
+            "SELECT m.id, m.session_id, m.time_created, m.data FROM message m WHERE m.time_created >= ? ORDER BY m.time_created ASC",
         ) {
             Ok(s) => s,
             Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
@@ -356,9 +380,11 @@ pub fn ingest_file_with_records(
                 records.push(record);
             }
         }
-        if !records.is_empty() {
-            store.upsert_records(&records)?;
-        }
+        let changed = if records.is_empty() {
+            0
+        } else {
+            store.upsert_records(&records)?
+        };
         if max_ts > previous_ts {
             store.set_checkpoint(
                 &key,
@@ -373,6 +399,7 @@ pub fn ingest_file_with_records(
             records: records.len() as u64,
             bad_lines: 0,
             truncated: false,
+            changed,
         };
         return Ok((stats, records));
     }
@@ -397,7 +424,7 @@ pub fn ingest_file_with_records(
             Ok(r) => r,
             Err(_) => return Ok((FileIngestStats::default(), Vec::new())),
         };
-        store.upsert_records(&records)?;
+        let changed = store.upsert_records(&records)?;
         store.set_checkpoint(
             &key,
             Checkpoint {
@@ -410,6 +437,7 @@ pub fn ingest_file_with_records(
             records: records.len() as u64,
             bad_lines: 0,
             truncated: false,
+            changed,
         };
         return Ok((stats, records));
     }
@@ -418,8 +446,10 @@ pub fn ingest_file_with_records(
         let mut previous_idx = -1i64;
         let mut is_truncated = false;
         if let Some(c) = store.get_checkpoint(&key)? {
-            // 大小与修改时间一致时短路跳过，避免重复轮询 SQLite 产生开销
-            if c.mtime_ms == mtime_ms && c.size == size {
+            // 大小与修改时间一致时短路跳过，避免重复轮询 SQLite 产生开销。
+            // v0.7.2 R1：force_read（WAL 增长 / .db-wal 事件）必须绕过该短路——
+            // WAL-only 写入不改变主库 stat，否则读到「无变化」漏掉新行。
+            if !force_read && c.mtime_ms == mtime_ms && c.size == size {
                 return Ok((FileIngestStats::default(), Vec::new()));
             }
             if size < c.size || mtime_ms < c.mtime_ms {
@@ -431,9 +461,11 @@ pub fn ingest_file_with_records(
         }
 
         let (records, max_idx) = parse_antigravity_db(path, previous_idx)?;
-        if !records.is_empty() {
-            store.upsert_records(&records)?;
-        }
+        let changed = if records.is_empty() {
+            0
+        } else {
+            store.upsert_records(&records)?
+        };
         if max_idx > previous_idx || is_truncated {
             store.set_checkpoint(
                 &key,
@@ -448,6 +480,7 @@ pub fn ingest_file_with_records(
             records: records.len() as u64,
             bad_lines: 0,
             truncated: is_truncated,
+            changed,
         };
         return Ok((stats, records));
     }
@@ -562,7 +595,7 @@ pub fn ingest_file_with_records(
     }
     stats.records = records.len() as u64;
 
-    store.upsert_records(&records)?;
+    stats.changed = store.upsert_records(&records)?;
     store.set_checkpoint(
         &key,
         Checkpoint {

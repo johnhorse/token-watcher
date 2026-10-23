@@ -33,15 +33,24 @@ use crate::tray::TrayCommand;
 
 /// 增量事件聚合窗口（OQ4：与 5 分钟宽限/激活阈值一并按体感调）
 pub const DEBOUNCE: Duration = Duration::from_millis(500);
+/// 去抖批次最大等待（R6）：批次首个待处理时刻起算，到期必 flush
+pub const DEBOUNCE_MAX: Duration = Duration::from_secs(2);
+/// 活跃窗口：最近 5 分钟内有 fs 事件或新入库记录即视为活跃
+pub const ACTIVE_WINDOW: Duration = Duration::from_secs(300);
+/// 活跃期 ①~④ 检查矩阵节拍
+pub const POLL_FAST: Duration = Duration::from_secs(3);
+/// 活跃期 ⑤ 根轻扫独立节拍（R3：目录递归是 stat 的百倍量级，不跟 3s 档）
+pub const POLL_ROOT_SCAN: Duration = Duration::from_secs(30);
+/// 空闲期慢扫节拍（自举悖论兜底：同一矩阵，含⑤）
+pub const POLL_IDLE: Duration = Duration::from_secs(60);
+/// ⑤ / 单根补扫单轮每根入队上限（R9：防风暴，超限由轮转续扫兜底）
+pub const ROOT_SCAN_ENQUEUE_CAP: usize = 200;
 /// DB 降级后的重试间隔（仅故障态生效，正常路径无轮询）
 const DB_RETRY: Duration = Duration::from_secs(10);
 /// 首扫进度事件最小间隔（文件多时避免 IPC 洪泛）
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
 
-/// ⑤ / 单根补扫单轮每根入队上限（R9：防风暴，超限由轮转续扫兜底）
-pub const ROOT_SCAN_ENQUEUE_CAP: usize = 200;
-
-/// 监听根标识：根目录事件触发的单根补扫（T1/R8）
+/// 兜底轮询覆盖的监听根（⑤ 根轻扫与单根补扫共用同一套预算/游标）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum RootKind {
     Projects,
@@ -54,6 +63,52 @@ enum RootKind {
     Zcode,
     Qoder,
     WorkBuddy,
+}
+
+const ROOT_KINDS: [RootKind; 10] = [
+    RootKind::Projects,
+    RootKind::Codex,
+    RootKind::Cline,
+    RootKind::Roo,
+    RootKind::Continue,
+    RootKind::Omp,
+    RootKind::Antigravity,
+    RootKind::Zcode,
+    RootKind::Qoder,
+    RootKind::WorkBuddy,
+];
+
+/// SQLite 源内存指纹（R2：只放内存，不落库）：主库 + WAL + SHM 的 (mtime_ms, size)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct SqliteFingerprint {
+    db: Option<(i64, i64)>,
+    wal: Option<(i64, i64)>,
+    shm: Option<(i64, i64)>,
+}
+
+fn file_fingerprint(path: &Path) -> Option<(i64, i64)> {
+    let metadata = fs::metadata(path).ok()?;
+    let mtime_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0);
+    Some((mtime_ms, metadata.len().min(i64::MAX as u64) as i64))
+}
+
+fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut raw = path.as_os_str().to_os_string();
+    raw.push(suffix);
+    PathBuf::from(raw)
+}
+
+fn sqlite_fingerprint(path: &Path) -> SqliteFingerprint {
+    SqliteFingerprint {
+        db: file_fingerprint(path),
+        wal: file_fingerprint(&sqlite_sidecar(path, "-wal")),
+        shm: file_fingerprint(&sqlite_sidecar(path, "-shm")),
+    }
 }
 
 /// 递归枚举目录下满足 `pred` 的文件；`max_depth` = 1 表示只看直接子项
@@ -422,9 +477,28 @@ pub struct DataEngine<S: EventSink> {
     db_retry_at: Option<Instant>,
     /// 监听根被创建/恢复后需要补一次静默全扫
     needs_catchup: bool,
-    /// 根目录事件触发的单根补扫（T1/R8）
+    // ---- v0.7.2 T2：兜底轮询（主循环单写者）----
+    /// 最近一次有效 fs 事件或新入库记录时刻（活跃判定）
+    last_activity: Instant,
+    /// ①~④ 检查矩阵的下次执行时刻
+    next_poll_at: Instant,
+    /// ⑤ 根轻扫的下次执行时刻（R3 独立节拍）
+    next_root_scan_at: Instant,
+    /// 去抖批次首个待处理时刻（R6 批次最大等待）
+    batch_started: Option<Instant>,
+    /// 根目录事件触发的单根补扫（R8）
     catchup_roots: HashSet<RootKind>,
-    /// 单根补扫的轮转续扫游标（R9）
+    /// ① JSONL 源 byte_offset 内存镜像（R1：stat size 对比基线）
+    jsonl_offsets: HashMap<PathBuf, i64>,
+    /// ② SQLite 源主库 + WAL/SHM 内存指纹（R2：WAL 指纹不落库）
+    sqlite_fingerprints: HashMap<PathBuf, SqliteFingerprint>,
+    /// ③ 记录数型源 (mtime_ms, size) 基线
+    record_src_fingerprints: HashMap<PathBuf, (i64, i64)>,
+    /// ④ settings.json / codex config.toml mtime 基线（None = 当时不存在）
+    config_mtimes: HashMap<PathBuf, Option<i64>>,
+    /// R1：需要强制重读的 SQLite 文件（绕过 Antigravity (mtime,size) 短路）
+    force_reads: HashSet<PathBuf>,
+    /// R9：⑤ 每根轮转续扫游标
     root_scan_cursors: HashMap<RootKind, usize>,
 }
 
@@ -588,6 +662,7 @@ impl<S: EventSink> DataEngine<S> {
             None
         };
 
+        let now = Instant::now();
         let mut engine = Self {
             paths,
             projects_root_canonical,
@@ -619,15 +694,58 @@ impl<S: EventSink> DataEngine<S> {
             debounce_deadline: None,
             db_retry_at,
             needs_catchup: false,
+            last_activity: now,
+            next_poll_at: now + POLL_FAST,
+            next_root_scan_at: now + POLL_ROOT_SCAN,
+            batch_started: None,
             catchup_roots: HashSet::new(),
+            jsonl_offsets: HashMap::new(),
+            sqlite_fingerprints: HashMap::new(),
+            record_src_fingerprints: HashMap::new(),
+            config_mtimes: HashMap::new(),
+            force_reads: HashSet::new(),
             root_scan_cursors: HashMap::new(),
         };
         engine.apply_initial_settings();
+        engine.prime_config_mtimes();
         engine
     }
     /// 检查指定文件是否处于去抖待处理队列中（测试与诊断用）
     pub fn pending_files_contains(&self, path: &Path) -> bool {
         self.pending_files.contains(path)
+    }
+
+    /// 测试钩子：立即执行一轮兜底检查矩阵（生产由 on_tick 按节拍驱动）
+    #[doc(hidden)]
+    pub fn poll_now(&mut self) {
+        self.poll_tick(Instant::now());
+    }
+
+    /// 测试钩子：把活跃窗口推到过去，模拟空闲期
+    #[doc(hidden)]
+    pub fn force_idle(&mut self) {
+        self.last_activity = Instant::now()
+            .checked_sub(ACTIVE_WINDOW + Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+    }
+
+    /// 测试钩子：令 ⑤ 根轻扫立即到期
+    #[doc(hidden)]
+    pub fn make_root_scan_due(&mut self) {
+        self.next_root_scan_at = Instant::now();
+    }
+
+    /// 测试钩子：距 ⑤ 下次根轻扫的剩余时间
+    #[doc(hidden)]
+    pub fn root_scan_due_in(&self) -> Duration {
+        self.next_root_scan_at
+            .saturating_duration_since(Instant::now())
+    }
+
+    /// 测试钩子：距下次轮询节拍的剩余时间
+    #[doc(hidden)]
+    pub fn next_poll_due_in(&self) -> Duration {
+        self.next_poll_at.saturating_duration_since(Instant::now())
     }
 
     /// 测试钩子：库内 usage_records 行数（-1 = 库不可用）
@@ -763,6 +881,7 @@ impl<S: EventSink> DataEngine<S> {
             ..Default::default()
         };
 
+        let mut ingested_paths = Vec::new();
         for (index, path) in all_files.into_iter().enumerate() {
             stats.files_scanned += 1;
             match ingest::ingest_file(&mut store, &path) {
@@ -772,6 +891,7 @@ impl<S: EventSink> DataEngine<S> {
                     if file_stats.truncated {
                         stats.truncated_files += 1;
                     }
+                    ingested_paths.push(path);
                 }
                 Err(e @ CoreError::Db(_)) => {
                     eprintln!("[token-watcher] 首扫数据库错误: {e}");
@@ -789,6 +909,10 @@ impl<S: EventSink> DataEngine<S> {
             } else if !sink.is_visible() {
                 hidden = true;
             }
+        }
+        // v0.7.2 ①/③：首扫同时建立轮询内存基线
+        for path in &ingested_paths {
+            self.remember_source(&store, path);
         }
         self.store = Some(store);
         if hidden {
@@ -863,26 +987,29 @@ impl<S: EventSink> DataEngine<S> {
         }
     }
 
-    /// 下一次需要醒来的时刻：去抖截止 / DB 重试。None → 可阻塞等消息。
+    /// 下一次需要醒来的时刻：去抖截止 / 兜底轮询 / DB 重试。
+    /// v0.7.2 T2：库可用时轮询档始终存在，主循环不再无限阻塞（fs 事件被吞也失明）。
     pub fn next_deadline(&self) -> Option<Instant> {
-        let debounce = if !self.has_pending_work() {
-            None
-        } else {
+        let debounce = if self.has_pending_work() {
             // 有待处理批次却没有截止时刻（防御）→ 立即处理，绝不无限阻塞
             Some(self.debounce_deadline.unwrap_or_else(Instant::now))
+        } else {
+            None
         };
         let retry = if self.store.is_none() {
             self.db_retry_at
         } else {
             None
         };
-        match (debounce, retry) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let poll = if self.store.is_some() {
+            Some(self.next_poll_at)
+        } else {
+            None
+        };
+        [debounce, retry, poll].into_iter().flatten().min()
     }
 
-    /// 到点后的推进：去抖批次落库、DB 降级重试
+    /// 到点后的推进：去抖批次落库、DB 降级重试、兜底轮询矩阵
     pub fn on_tick(&mut self) {
         let now = Instant::now();
         if self.debounce_deadline.is_some_and(|d| now >= d) {
@@ -894,12 +1021,245 @@ impl<S: EventSink> DataEngine<S> {
                     self.try_reopen_store();
                 }
             }
+            return;
+        }
+        if now >= self.next_poll_at {
+            self.poll_tick(now);
+        }
+    }
+
+    /// 一轮兜底检查矩阵（P3）：①~④ 每轮必跑，⑤ 到点才跑；有新工作立即落库。
+    fn poll_tick(&mut self, now: Instant) {
+        let active = self.is_active(now);
+        self.poll_jsonl_sources();
+        self.poll_sqlite_sources();
+        self.poll_record_sources();
+        self.poll_config_sources();
+        if now >= self.next_root_scan_at {
+            for kind in ROOT_KINDS {
+                self.root_light_scan(kind);
+            }
+            self.next_root_scan_at = now + POLL_ROOT_SCAN;
+        }
+        // 活跃期 3s 快档；空闲期 60s 慢扫同一矩阵（含⑤）
+        self.next_poll_at = now + if active { POLL_FAST } else { POLL_IDLE };
+        if self.has_pending_work() {
+            self.flush();
+        }
+    }
+
+    /// ① JSONL 源（含 aider analytics.jsonl）：stat size vs byte_offset 内存镜像
+    fn poll_jsonl_sources(&mut self) {
+        let mut hits = Vec::new();
+        for (path, offset) in &self.jsonl_offsets {
+            if let Some((_, size)) = file_fingerprint(path) {
+                if size != *offset {
+                    hits.push(path.clone());
+                }
+            }
+        }
+        for path in hits {
+            self.pending_files.insert(path);
+        }
+    }
+
+    /// ② SQLite 源：主库 + WAL/SHM 指纹与内存基线比对，不匹配即强制重读（R1/R2）
+    fn poll_sqlite_sources(&mut self) {
+        let mut candidates = Vec::new();
+        if self.paths.opencode_db_path.is_file() {
+            candidates.push(self.paths.opencode_db_path.clone());
+        }
+        if let Ok(entries) = fs::read_dir(&self.paths.antigravity_conversations_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("db") {
+                    candidates.push(path);
+                }
+            }
+        }
+        for path in candidates {
+            let observed = sqlite_fingerprint(&path);
+            let mismatched = self
+                .sqlite_fingerprints
+                .get(&path)
+                .map(|previous| *previous != observed)
+                // 首次观测（含重启）→ 强制读一次，幂等兜底
+                .unwrap_or(true);
+            // F5：每次观测后更新基线，持续不匹配也不会 force-read 空转
+            self.sqlite_fingerprints.insert(path.clone(), observed);
+            if mismatched {
+                self.force_reads.insert(path.clone());
+                self.pending_files.insert(path);
+            }
+        }
+    }
+
+    /// ③ 记录数型源（Cline/Roo ui_messages.json、Continue *.json）：stat (mtime,size)
+    fn poll_record_sources(&mut self) {
+        let mut hits = Vec::new();
+        for (path, baseline) in &self.record_src_fingerprints {
+            if let Some(fingerprint) = file_fingerprint(path) {
+                if fingerprint != *baseline {
+                    hits.push(path.clone());
+                }
+            }
+        }
+        for path in hits {
+            self.pending_files.insert(path);
+        }
+    }
+
+    /// ④ settings.json / codex config.toml：只比对 mtime，不匹配置 dirty，
+    /// 由下个 flush 走既有 apply_settings_from_disk（tick 内不读文件）
+    fn poll_config_sources(&mut self) {
+        let paths = [
+            self.paths.settings_path.clone(),
+            self.paths.codex_config_path.clone(),
+        ];
+        for path in paths {
+            let current = file_fingerprint(&path).map(|(mtime, _)| mtime);
+            match self.config_mtimes.get(&path).copied() {
+                Some(previous) if previous == current => {}
+                Some(_) => {
+                    self.config_mtimes.insert(path, current);
+                    self.settings_dirty = true;
+                }
+                None => {
+                    self.config_mtimes.insert(path, current);
+                }
+            }
+        }
+    }
+
+    /// ⑤ 单根有界轻扫（R9）：按源族枚举，单轮每根最多入队
+    /// [`ROOT_SCAN_ENQUEUE_CAP`] 个；游标轮转让超上限的文件最终全部入账。
+    /// 只发现「未知文件」——已知文件的增量由 ①/②/③ 的 stat 比对负责。
+    fn root_light_scan(&mut self, kind: RootKind) -> bool {
+        let mut files = self.collect_root_candidates(kind);
+        files.retain(|path| !self.is_known_source(path, kind));
+        if files.is_empty() {
+            self.root_scan_cursors.insert(kind, 0);
+            return false;
+        }
+        files.sort();
+        files.dedup();
+        let len = files.len();
+        let start = self.root_scan_cursors.get(&kind).copied().unwrap_or(0) % len;
+        let take = len.min(ROOT_SCAN_ENQUEUE_CAP);
+        let mut added = false;
+        for index in 0..take {
+            if self
+                .pending_files
+                .insert(files[(start + index) % len].clone())
+            {
+                added = true;
+            }
+        }
+        let next = if take >= len { 0 } else { (start + take) % len };
+        self.root_scan_cursors.insert(kind, next);
+        added
+    }
+
+    /// 根目录按源族的真实目录结构枚举候选文件（与既有 collect/parse 逻辑一致）
+    fn collect_root_candidates(&self, kind: RootKind) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let is_jsonl = |p: &Path| p.extension().and_then(|e| e.to_str()) == Some("jsonl");
+        let is_ui_messages =
+            |p: &Path| p.file_name().and_then(|n| n.to_str()) == Some("ui_messages.json");
+        let is_json = |p: &Path| p.extension().and_then(|e| e.to_str()) == Some("json");
+        let is_db = |p: &Path| p.extension().and_then(|e| e.to_str()) == Some("db");
+        match kind {
+            RootKind::Projects => {
+                collect_files_matching(&self.paths.projects_root, 4, &is_jsonl, &mut out)
+            }
+            RootKind::Codex => {
+                collect_files_matching(&self.paths.codex_sessions_root, 5, &is_jsonl, &mut out)
+            }
+            RootKind::Omp => {
+                collect_files_matching(&self.paths.omp_sessions_root, 4, &is_jsonl, &mut out)
+            }
+            RootKind::Zcode => {
+                collect_files_matching(&self.paths.zcode_root, 4, &is_jsonl, &mut out)
+            }
+            RootKind::Qoder => {
+                collect_files_matching(&self.paths.qoder_root, 4, &is_jsonl, &mut out)
+            }
+            RootKind::WorkBuddy => {
+                collect_files_matching(&self.paths.workbuddy_root, 4, &is_jsonl, &mut out)
+            }
+            // Cline/Roo：根/任务目录/ui_messages.json
+            RootKind::Cline => {
+                collect_files_matching(&self.paths.cline_tasks_root, 2, &is_ui_messages, &mut out)
+            }
+            RootKind::Roo => {
+                collect_files_matching(&self.paths.roo_tasks_root, 2, &is_ui_messages, &mut out)
+            }
+            // Continue：根下（含一层子目录）的 *.json
+            RootKind::Continue => {
+                collect_files_matching(&self.paths.continue_sessions_root, 2, &is_json, &mut out)
+            }
+            // Antigravity：根下 *.db（OpenCode 固定路径已由 ② 覆盖）
+            RootKind::Antigravity => collect_files_matching(
+                &self.paths.antigravity_conversations_root,
+                2,
+                &is_db,
+                &mut out,
+            ),
+        }
+        out
+    }
+
+    fn is_known_source(&self, path: &Path, kind: RootKind) -> bool {
+        match kind {
+            RootKind::Cline | RootKind::Roo | RootKind::Continue => {
+                self.record_src_fingerprints.contains_key(path)
+            }
+            RootKind::Antigravity => self.sqlite_fingerprints.contains_key(path),
+            _ => self.jsonl_offsets.contains_key(path),
+        }
+    }
+
+    /// 记录一个已 ingest 文件的轮询基线（①/③ 的内存镜像）
+    fn remember_source(&mut self, store: &Store, path: &Path) {
+        use crate::core::ingest::FileEngineKind;
+        let checkpoint = store
+            .get_checkpoint(&ingest::checkpoint_key(path))
+            .ok()
+            .flatten();
+        match ingest::detect_file_kind(path, &[]) {
+            FileEngineKind::ClaudeCode
+            | FileEngineKind::CodexCli
+            | FileEngineKind::Aider
+            | FileEngineKind::Omp
+            | FileEngineKind::ZCode
+            | FileEngineKind::Qoder
+            | FileEngineKind::WorkBuddy => {
+                if let Some(checkpoint) = checkpoint {
+                    self.jsonl_offsets
+                        .insert(path.to_path_buf(), checkpoint.byte_offset);
+                }
+            }
+            FileEngineKind::Cline | FileEngineKind::RooCode | FileEngineKind::Continue => {
+                // 解析失败（如 Continue 根下的非会话 json）不会留下 checkpoint：
+                // 记下观测指纹，避免⑤每轮把它当未知文件重复扫。
+                let fingerprint = match checkpoint {
+                    Some(checkpoint) => (checkpoint.mtime_ms, checkpoint.size),
+                    None => match file_fingerprint(path) {
+                        Some(fingerprint) => fingerprint,
+                        None => return,
+                    },
+                };
+                self.record_src_fingerprints
+                    .insert(path.to_path_buf(), fingerprint);
+            }
+            FileEngineKind::Antigravity | FileEngineKind::OpenCode => {}
         }
     }
 
     /// 强制处理当前去抖批次（测试直接调用；生产由 on_tick 在窗口到期后调用）
     pub fn flush(&mut self) {
         self.debounce_deadline = None;
+        self.batch_started = None;
         if self.has_pending_work() {
             let mut changed = false;
 
@@ -937,13 +1297,17 @@ impl<S: EventSink> DataEngine<S> {
             };
             let mut pulses = Vec::new();
             let mut touched_sessions = std::collections::HashSet::new();
-            let mut parsed_records = 0u64;
+            let mut changed_rows = 0u64;
             let mut skipped = 0u64;
             let mut db_error = None;
             for path in files {
-                match ingest::ingest_file_with_records(&mut store, &path) {
+                // R1：事件路径与轮询路径同权，强制重读标记在这里生效
+                let force_read = self.force_reads.remove(&path);
+                match ingest::ingest_file_with_records_forced(&mut store, &path, force_read) {
                     Ok((stats, records)) => {
-                        parsed_records += stats.records;
+                        changed_rows += stats.changed;
+                        // 轮询内存基线（①/③）随 ingest 刷新
+                        self.remember_source(&store, &path);
                         for record in &records {
                             touched_sessions.insert(record.session_id.clone());
                             pulses.push(pulse_json(record));
@@ -971,8 +1335,10 @@ impl<S: EventSink> DataEngine<S> {
                 self.health.skipped_files += skipped;
                 self.publish_health_if_changed();
             }
-            if parsed_records > 0 {
+            // R7：emit 由 UPSERT 实际变更行数驱动（替代按数量差切片判断）
+            if changed_rows > 0 {
                 changed = true;
+                self.last_activity = Instant::now();
             }
             // usage-pulse：本次解析出的 Record 行逐条发（重复导入会重发，
             // UI 幂等累计可接受——契约的到达脉冲语义）
@@ -993,6 +1359,8 @@ impl<S: EventSink> DataEngine<S> {
         if matches!(event.kind, EventKind::Access(_) | EventKind::Remove(_)) {
             return;
         }
+        // R6：批次首个待处理时刻要在本次事件入库前判定
+        let had_work_before = self.has_pending_work();
         let mut relevant = false;
         for path in &event.paths {
             if self.is_source_event(path) {
@@ -1008,6 +1376,9 @@ impl<S: EventSink> DataEngine<S> {
                     let db_str = path.to_string_lossy().trim_end_matches("-wal").to_string();
                     let db_path = std::path::PathBuf::from(db_str);
                     if db_path.is_file() {
+                        // R1：WAL 事件与轮询路径同权——主库 (mtime,size) 未必变化，
+                        // 入队时必须同时标记强制重读，否则被短路吞掉。
+                        self.force_reads.insert(db_path.clone());
                         self.pending_files.insert(db_path);
                     }
                 } else {
@@ -1018,7 +1389,7 @@ impl<S: EventSink> DataEngine<S> {
                 if self.collect_dir_sources(path) {
                     relevant = true;
                 }
-                // T1/R8：目录事件落在监听根自身 → 只补扫该根
+                // T1/R8：目录事件落在监听根自身 → 只补扫该根（与⑤共享预算/游标）
                 if let Some(kind) = self.root_kind_of(path) {
                     self.catchup_roots.insert(kind);
                     relevant = true;
@@ -1105,7 +1476,14 @@ impl<S: EventSink> DataEngine<S> {
             }
         }
         if relevant {
-            self.debounce_deadline = Some(Instant::now() + DEBOUNCE);
+            let now = Instant::now();
+            self.last_activity = now;
+            if !had_work_before {
+                self.batch_started = Some(now);
+            }
+            // R6：min(单事件去抖, 批次首项 + 2s)——持续事件流不得无限推迟首批落库
+            let hard_deadline = self.batch_started.unwrap_or(now) + DEBOUNCE_MAX;
+            self.debounce_deadline = Some((now + DEBOUNCE).min(hard_deadline));
         }
     }
 
@@ -1115,6 +1493,10 @@ impl<S: EventSink> DataEngine<S> {
             || self.settings_dirty
             || self.needs_catchup
             || !self.catchup_roots.is_empty()
+    }
+
+    fn is_active(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last_activity) < ACTIVE_WINDOW
     }
 
     /// 判断路径是否为某个监听根自身（T1：根目录事件的单根补扫入口）
@@ -1146,6 +1528,18 @@ impl<S: EventSink> DataEngine<S> {
             }
         }
         None
+    }
+
+    /// ④ 基线：启动时记录 settings.json / codex config.toml 的 mtime
+    fn prime_config_mtimes(&mut self) {
+        let paths = [
+            self.paths.settings_path.clone(),
+            self.paths.codex_config_path.clone(),
+        ];
+        for path in paths {
+            let mtime = file_fingerprint(&path).map(|(mtime, _)| mtime);
+            self.config_mtimes.insert(path, mtime);
+        }
     }
 
     fn under_projects(&self, path: &Path) -> bool {
@@ -1646,85 +2040,9 @@ impl<S: EventSink> DataEngine<S> {
         Ok(changed)
     }
 
-    /// 单根有界轻扫（R9）：按源族枚举，单轮每根最多入队
-    /// [`ROOT_SCAN_ENQUEUE_CAP`] 个；游标轮转让超上限的文件最终全部入账。
-    fn root_light_scan(&mut self, kind: RootKind) -> bool {
-        let mut files = self.collect_root_candidates(kind);
-        if files.is_empty() {
-            self.root_scan_cursors.insert(kind, 0);
-            return false;
-        }
-        files.sort();
-        files.dedup();
-        let len = files.len();
-        let start = self.root_scan_cursors.get(&kind).copied().unwrap_or(0) % len;
-        let take = len.min(ROOT_SCAN_ENQUEUE_CAP);
-        let mut added = false;
-        for index in 0..take {
-            if self
-                .pending_files
-                .insert(files[(start + index) % len].clone())
-            {
-                added = true;
-            }
-        }
-        let next = if take >= len { 0 } else { (start + take) % len };
-        self.root_scan_cursors.insert(kind, next);
-        added
-    }
-
-    /// 根目录按源族的真实目录结构枚举候选文件（与既有 collect/parse 逻辑一致）
-    fn collect_root_candidates(&self, kind: RootKind) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        let is_jsonl = |p: &Path| p.extension().and_then(|e| e.to_str()) == Some("jsonl");
-        let is_ui_messages =
-            |p: &Path| p.file_name().and_then(|n| n.to_str()) == Some("ui_messages.json");
-        let is_json = |p: &Path| p.extension().and_then(|e| e.to_str()) == Some("json");
-        let is_db = |p: &Path| p.extension().and_then(|e| e.to_str()) == Some("db");
-        match kind {
-            RootKind::Projects => {
-                collect_files_matching(&self.paths.projects_root, 4, &is_jsonl, &mut out)
-            }
-            RootKind::Codex => {
-                collect_files_matching(&self.paths.codex_sessions_root, 5, &is_jsonl, &mut out)
-            }
-            RootKind::Omp => {
-                collect_files_matching(&self.paths.omp_sessions_root, 4, &is_jsonl, &mut out)
-            }
-            RootKind::Zcode => {
-                collect_files_matching(&self.paths.zcode_root, 4, &is_jsonl, &mut out)
-            }
-            RootKind::Qoder => {
-                collect_files_matching(&self.paths.qoder_root, 4, &is_jsonl, &mut out)
-            }
-            RootKind::WorkBuddy => {
-                collect_files_matching(&self.paths.workbuddy_root, 4, &is_jsonl, &mut out)
-            }
-            // Cline/Roo：根/任务目录/ui_messages.json
-            RootKind::Cline => {
-                collect_files_matching(&self.paths.cline_tasks_root, 2, &is_ui_messages, &mut out)
-            }
-            RootKind::Roo => {
-                collect_files_matching(&self.paths.roo_tasks_root, 2, &is_ui_messages, &mut out)
-            }
-            // Continue：根下（含一层子目录）的 *.json
-            RootKind::Continue => {
-                collect_files_matching(&self.paths.continue_sessions_root, 2, &is_json, &mut out)
-            }
-            // Antigravity：根下 *.db
-            RootKind::Antigravity => collect_files_matching(
-                &self.paths.antigravity_conversations_root,
-                2,
-                &is_db,
-                &mut out,
-            ),
-        }
-        out
-    }
-
     /// 静默全扫（不做进度态）：DB 恢复 / 监听根迟到 / 窗口重现时补课。
-    /// `Some(kind)` = 根目录事件触发的单根补扫（T1/R8）：有界轻扫（入队上限 +
-    /// 轮转续扫游标），只入队不直接落库，由 flush 统一处理。
+    /// `Some(kind)` = 根目录事件触发的单根补扫（T1/R8）：复用⑤的有界轻扫
+    /// （入队上限 + 轮转续扫游标），只入队不直接落库，由 flush 统一处理。
     /// 返回是否需要 dashboard-dirty。
     fn quiet_scan(&mut self, only: Option<RootKind>) -> bool {
         if let Some(kind) = only {
@@ -1803,6 +2121,16 @@ impl<S: EventSink> DataEngine<S> {
                 }
                 Err(_) => {}
             }
+        }
+        // 全量补扫后刷新轮询内存基线（①/③）
+        for kind in ROOT_KINDS {
+            for path in self.collect_root_candidates(kind) {
+                self.remember_source(&store, &path);
+            }
+        }
+        let aider_path = self.paths.aider_analytics_path.clone();
+        if aider_path.is_file() {
+            self.remember_source(&store, &aider_path);
         }
         self.store = Some(store);
         self.publish_health_if_changed();
@@ -1926,6 +2254,7 @@ impl<S: EventSink> DataEngine<S> {
         self.pending_files.clear();
         self.settings_dirty = false;
         self.catchup_roots.clear();
+        self.force_reads.clear();
         if !self.health.db_readonly {
             eprintln!("[token-watcher] 数据库不可写，进入只读降级（每 10s 重试）");
         }

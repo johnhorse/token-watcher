@@ -4,7 +4,7 @@
 //! - SC4：删除源 JSONL（直接 scan_dir 与运行期 fs 删除事件）历史仍在
 //! - 空态：~/.claude/projects 不存在 / 存在但无 jsonl；空态后首条数据能接上
 //! - SC10/D17 第二、三档：单文件不可读跳过计数、根目录不可读横幅
-//! - SC6：空闲态无待处理 deadline（无轮询）
+//! - SC6：空闲态保留 60s 兜底慢扫 deadline（v0.7.2 放宽：不再无限阻塞）
 //! - 首扫事件序：scanning → done 后紧跟 dashboard-dirty
 
 use std::fs;
@@ -544,7 +544,8 @@ fn sc10_unreadable_root_reports_banner() {
     );
 }
 
-/// SC6：空闲（无 fs 事件/去抖批次）时没有待处理 deadline —— 不轮询。
+/// SC6（v0.7.2 修订）：空闲时没有去抖批次 deadline，但保留 60s 毫秒级兜底慢扫
+/// —— fs 事件被吞也能自愈，不再无限阻塞等消息。
 #[test]
 fn sc6_idle_engine_has_no_pending_deadline() {
     let temp = TempDir::new();
@@ -565,15 +566,20 @@ fn sc6_idle_engine_has_no_pending_deadline() {
     engine.initial_scan();
     engine.flush();
 
+    let deadline = engine
+        .next_deadline()
+        .expect("兜底轮询必须保留一档到期时间，主循环不得无限阻塞");
     assert!(
-        engine.next_deadline().is_none(),
-        "首扫完成且无待处理批次时应可无限阻塞等消息"
+        deadline.saturating_duration_since(Instant::now())
+            <= token_watcher_lib::watch::POLL_IDLE + Duration::from_secs(1),
+        "轮询档位不得超过空闲慢扫间隔"
     );
     let dirty_before = sink.named("dashboard-dirty").len();
     engine.on_tick();
+    let after = engine.next_deadline().expect("空闲 tick 不得回到无限阻塞");
     assert!(
-        engine.next_deadline().is_none(),
-        "空闲 tick 不得制造新的 deadline"
+        after.saturating_duration_since(Instant::now())
+            <= token_watcher_lib::watch::POLL_IDLE + Duration::from_secs(1)
     );
     assert_eq!(
         sink.named("dashboard-dirty").len(),
