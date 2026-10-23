@@ -14,7 +14,7 @@
 //! emit（置 pending），watcher 继续 ingest 保持数据新鲜；重新显示时发一次
 //! `dashboard-dirty` 触发 UI 全量水合（契约水合语义）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -37,6 +37,49 @@ pub const DEBOUNCE: Duration = Duration::from_millis(500);
 const DB_RETRY: Duration = Duration::from_secs(10);
 /// 首扫进度事件最小间隔（文件多时避免 IPC 洪泛）
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
+
+/// ⑤ / 单根补扫单轮每根入队上限（R9：防风暴，超限由轮转续扫兜底）
+pub const ROOT_SCAN_ENQUEUE_CAP: usize = 200;
+
+/// 监听根标识：根目录事件触发的单根补扫（T1/R8）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RootKind {
+    Projects,
+    Codex,
+    Cline,
+    Roo,
+    Continue,
+    Omp,
+    Antigravity,
+    Zcode,
+    Qoder,
+    WorkBuddy,
+}
+
+/// 递归枚举目录下满足 `pred` 的文件；`max_depth` = 1 表示只看直接子项
+fn collect_files_matching(
+    dir: &Path,
+    max_depth: usize,
+    pred: &dyn Fn(&Path) -> bool,
+    out: &mut Vec<PathBuf>,
+) {
+    if max_depth == 0 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if max_depth > 1 {
+                collect_files_matching(&path, max_depth - 1, pred, out);
+            }
+        } else if path.is_file() && pred(&path) {
+            out.push(path);
+        }
+    }
+}
 
 pub const WINDOW_LABEL: &str = "main";
 
@@ -379,6 +422,10 @@ pub struct DataEngine<S: EventSink> {
     db_retry_at: Option<Instant>,
     /// 监听根被创建/恢复后需要补一次静默全扫
     needs_catchup: bool,
+    /// 根目录事件触发的单根补扫（T1/R8）
+    catchup_roots: HashSet<RootKind>,
+    /// 单根补扫的轮转续扫游标（R9）
+    root_scan_cursors: HashMap<RootKind, usize>,
 }
 
 impl<S: EventSink> DataEngine<S> {
@@ -572,6 +619,8 @@ impl<S: EventSink> DataEngine<S> {
             debounce_deadline: None,
             db_retry_at,
             needs_catchup: false,
+            catchup_roots: HashSet::new(),
+            root_scan_cursors: HashMap::new(),
         };
         engine.apply_initial_settings();
         engine
@@ -579,6 +628,15 @@ impl<S: EventSink> DataEngine<S> {
     /// 检查指定文件是否处于去抖待处理队列中（测试与诊断用）
     pub fn pending_files_contains(&self, path: &Path) -> bool {
         self.pending_files.contains(path)
+    }
+
+    /// 测试钩子：库内 usage_records 行数（-1 = 库不可用）
+    #[doc(hidden)]
+    pub fn record_count(&self) -> i64 {
+        self.store
+            .as_ref()
+            .and_then(|store| store.count_records().ok())
+            .unwrap_or(-1)
     }
 
     /// 启动时先把当前 settings 应用到时间线（在首扫之前），
@@ -807,13 +865,12 @@ impl<S: EventSink> DataEngine<S> {
 
     /// 下一次需要醒来的时刻：去抖截止 / DB 重试。None → 可阻塞等消息。
     pub fn next_deadline(&self) -> Option<Instant> {
-        let debounce =
-            if self.pending_files.is_empty() && !self.settings_dirty && !self.needs_catchup {
-                None
-            } else {
-                // 有待处理批次却没有截止时刻（防御）→ 立即处理，绝不无限阻塞
-                Some(self.debounce_deadline.unwrap_or_else(Instant::now))
-            };
+        let debounce = if !self.has_pending_work() {
+            None
+        } else {
+            // 有待处理批次却没有截止时刻（防御）→ 立即处理，绝不无限阻塞
+            Some(self.debounce_deadline.unwrap_or_else(Instant::now))
+        };
         let retry = if self.store.is_none() {
             self.db_retry_at
         } else {
@@ -843,7 +900,7 @@ impl<S: EventSink> DataEngine<S> {
     /// 强制处理当前去抖批次（测试直接调用；生产由 on_tick 在窗口到期后调用）
     pub fn flush(&mut self) {
         self.debounce_deadline = None;
-        if self.settings_dirty || !self.pending_files.is_empty() || self.needs_catchup {
+        if self.has_pending_work() {
             let mut changed = false;
 
             // settings 先于文件：同批次里切换后的记录应按新档案归因
@@ -859,7 +916,12 @@ impl<S: EventSink> DataEngine<S> {
             }
             if self.needs_catchup {
                 self.needs_catchup = false;
-                changed |= self.quiet_scan();
+                changed |= self.quiet_scan(None);
+            }
+            // T1/R8：根目录事件只补扫所属根，入队后与普通批次一起落库
+            let catchup_roots: Vec<RootKind> = self.catchup_roots.drain().collect();
+            for kind in catchup_roots {
+                self.quiet_scan(Some(kind));
             }
 
             let files: Vec<PathBuf> = self.pending_files.drain().collect();
@@ -956,6 +1018,11 @@ impl<S: EventSink> DataEngine<S> {
                 if self.collect_dir_sources(path) {
                     relevant = true;
                 }
+                // T1/R8：目录事件落在监听根自身 → 只补扫该根
+                if let Some(kind) = self.root_kind_of(path) {
+                    self.catchup_roots.insert(kind);
+                    relevant = true;
+                }
             } else if self.under_omp(path) {
                 // omp 专有文件联动：
                 // 1) 锁文件 .<session>.jsonl.lock.os 联动对应 <session>.jsonl
@@ -1040,6 +1107,45 @@ impl<S: EventSink> DataEngine<S> {
         if relevant {
             self.debounce_deadline = Some(Instant::now() + DEBOUNCE);
         }
+    }
+
+    /// 是否有待落库的工作（去抖批次 / settings / 补扫）
+    fn has_pending_work(&self) -> bool {
+        !self.pending_files.is_empty()
+            || self.settings_dirty
+            || self.needs_catchup
+            || !self.catchup_roots.is_empty()
+    }
+
+    /// 判断路径是否为某个监听根自身（T1：根目录事件的单根补扫入口）
+    fn root_kind_of(&self, path: &Path) -> Option<RootKind> {
+        let candidates: [(RootKind, &PathBuf); 10] = [
+            (RootKind::Projects, &self.paths.projects_root),
+            (RootKind::Codex, &self.paths.codex_sessions_root),
+            (RootKind::Cline, &self.paths.cline_tasks_root),
+            (RootKind::Roo, &self.paths.roo_tasks_root),
+            (RootKind::Continue, &self.paths.continue_sessions_root),
+            (RootKind::Omp, &self.paths.omp_sessions_root),
+            (
+                RootKind::Antigravity,
+                &self.paths.antigravity_conversations_root,
+            ),
+            (RootKind::Zcode, &self.paths.zcode_root),
+            (RootKind::Qoder, &self.paths.qoder_root),
+            (RootKind::WorkBuddy, &self.paths.workbuddy_root),
+        ];
+        let canonical = fs::canonicalize(path).ok();
+        for (kind, root) in candidates {
+            if path == root.as_path() {
+                return Some(kind);
+            }
+            if let Some(c) = &canonical {
+                if fs::canonicalize(root).map(|r| &r == c).unwrap_or(false) {
+                    return Some(kind);
+                }
+            }
+        }
+        None
     }
 
     fn under_projects(&self, path: &Path) -> bool {
@@ -1540,9 +1646,91 @@ impl<S: EventSink> DataEngine<S> {
         Ok(changed)
     }
 
+    /// 单根有界轻扫（R9）：按源族枚举，单轮每根最多入队
+    /// [`ROOT_SCAN_ENQUEUE_CAP`] 个；游标轮转让超上限的文件最终全部入账。
+    fn root_light_scan(&mut self, kind: RootKind) -> bool {
+        let mut files = self.collect_root_candidates(kind);
+        if files.is_empty() {
+            self.root_scan_cursors.insert(kind, 0);
+            return false;
+        }
+        files.sort();
+        files.dedup();
+        let len = files.len();
+        let start = self.root_scan_cursors.get(&kind).copied().unwrap_or(0) % len;
+        let take = len.min(ROOT_SCAN_ENQUEUE_CAP);
+        let mut added = false;
+        for index in 0..take {
+            if self
+                .pending_files
+                .insert(files[(start + index) % len].clone())
+            {
+                added = true;
+            }
+        }
+        let next = if take >= len { 0 } else { (start + take) % len };
+        self.root_scan_cursors.insert(kind, next);
+        added
+    }
+
+    /// 根目录按源族的真实目录结构枚举候选文件（与既有 collect/parse 逻辑一致）
+    fn collect_root_candidates(&self, kind: RootKind) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let is_jsonl = |p: &Path| p.extension().and_then(|e| e.to_str()) == Some("jsonl");
+        let is_ui_messages =
+            |p: &Path| p.file_name().and_then(|n| n.to_str()) == Some("ui_messages.json");
+        let is_json = |p: &Path| p.extension().and_then(|e| e.to_str()) == Some("json");
+        let is_db = |p: &Path| p.extension().and_then(|e| e.to_str()) == Some("db");
+        match kind {
+            RootKind::Projects => {
+                collect_files_matching(&self.paths.projects_root, 4, &is_jsonl, &mut out)
+            }
+            RootKind::Codex => {
+                collect_files_matching(&self.paths.codex_sessions_root, 5, &is_jsonl, &mut out)
+            }
+            RootKind::Omp => {
+                collect_files_matching(&self.paths.omp_sessions_root, 4, &is_jsonl, &mut out)
+            }
+            RootKind::Zcode => {
+                collect_files_matching(&self.paths.zcode_root, 4, &is_jsonl, &mut out)
+            }
+            RootKind::Qoder => {
+                collect_files_matching(&self.paths.qoder_root, 4, &is_jsonl, &mut out)
+            }
+            RootKind::WorkBuddy => {
+                collect_files_matching(&self.paths.workbuddy_root, 4, &is_jsonl, &mut out)
+            }
+            // Cline/Roo：根/任务目录/ui_messages.json
+            RootKind::Cline => {
+                collect_files_matching(&self.paths.cline_tasks_root, 2, &is_ui_messages, &mut out)
+            }
+            RootKind::Roo => {
+                collect_files_matching(&self.paths.roo_tasks_root, 2, &is_ui_messages, &mut out)
+            }
+            // Continue：根下（含一层子目录）的 *.json
+            RootKind::Continue => {
+                collect_files_matching(&self.paths.continue_sessions_root, 2, &is_json, &mut out)
+            }
+            // Antigravity：根下 *.db
+            RootKind::Antigravity => collect_files_matching(
+                &self.paths.antigravity_conversations_root,
+                2,
+                &is_db,
+                &mut out,
+            ),
+        }
+        out
+    }
+
     /// 静默全扫（不做进度态）：DB 恢复 / 监听根迟到 / 窗口重现时补课。
+    /// `Some(kind)` = 根目录事件触发的单根补扫（T1/R8）：有界轻扫（入队上限 +
+    /// 轮转续扫游标），只入队不直接落库，由 flush 统一处理。
     /// 返回是否需要 dashboard-dirty。
-    fn quiet_scan(&mut self) -> bool {
+    fn quiet_scan(&mut self, only: Option<RootKind>) -> bool {
+        if let Some(kind) = only {
+            self.root_light_scan(kind);
+            return false;
+        }
         let Some(mut store) = self.store.take() else {
             return false;
         };
@@ -1693,7 +1881,10 @@ impl<S: EventSink> DataEngine<S> {
             || self.paths.omp_sessions_root.exists()
             || self.paths.aider_analytics_path.exists()
             || self.paths.opencode_db_path.exists();
-        if (self.health.root_unreadable || self.needs_catchup) && root_exists && self.quiet_scan() {
+        if (self.health.root_unreadable || self.needs_catchup)
+            && root_exists
+            && self.quiet_scan(None)
+        {
             self.needs_catchup = false;
             self.emit_dirty();
         }
@@ -1716,7 +1907,7 @@ impl<S: EventSink> DataEngine<S> {
                         return;
                     }
                 }
-                if self.quiet_scan() {
+                if self.quiet_scan(None) {
                     changed = true;
                 }
                 if changed {
@@ -1734,6 +1925,7 @@ impl<S: EventSink> DataEngine<S> {
         self.store = None;
         self.pending_files.clear();
         self.settings_dirty = false;
+        self.catchup_roots.clear();
         if !self.health.db_readonly {
             eprintln!("[token-watcher] 数据库不可写，进入只读降级（每 10s 重试）");
         }
