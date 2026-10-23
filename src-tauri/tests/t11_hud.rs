@@ -330,3 +330,14 @@ fn test_app_settings_independent_mode_positions() {
     // 胶囊保持独立 None，以触发专属屏幕居中顶部默认位置
     assert_eq!(legacy.get_position_for_mode(HudMode::Capsule), (None, None));
 }
+
+#[test]
+fn test_hud_widget_height_bounds() {
+    use token_watcher_lib::app_settings::HudMode;
+    use token_watcher_lib::hud::{hud_size_for_mode, HUD_WIDGET_HEIGHT, HUD_WIDGET_WIDTH};
+
+    // 基础桌面小组件初始视口尺寸规范为 320x390
+    assert_eq!(HUD_WIDGET_WIDTH, 320.0);
+    assert_eq!(HUD_WIDGET_HEIGHT, 390.0);
+    assert_eq!(hud_size_for_mode(HudMode::Widget), (320.0, 390.0));
+}

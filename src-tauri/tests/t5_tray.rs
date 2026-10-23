@@ -189,6 +189,41 @@ fn settings_roundtrip_shape_and_missing_file() {
     assert_eq!(default_settings.autostart, None);
     assert!(default_settings.is_autostart_enabled());
 }
+
+#[test]
+fn autostart_sync_avoids_redundant_enable_on_already_enabled_startup() {
+    use token_watcher_lib::app_settings::{determine_autostart_action, AutostartAction};
+
+    // 根因防御：已在系统中启用开机自启时再次启动应用，动作必须为 Noop（绝不重写 plist 导致 macOS 反复弹窗）
+    assert_eq!(
+        determine_autostart_action(true, Ok(true)),
+        AutostartAction::Noop
+    );
+    // 已在系统中禁用自启时启动应用，动作必须为 Noop
+    assert_eq!(
+        determine_autostart_action(false, Ok(false)),
+        AutostartAction::Noop
+    );
+    // 期望开启但系统未开启（如首次运行或 plist 丢失）：触发 Enable
+    assert_eq!(
+        determine_autostart_action(true, Ok(false)),
+        AutostartAction::Enable
+    );
+    // 期望关闭但系统残留开启：触发 Disable
+    assert_eq!(
+        determine_autostart_action(false, Ok(true)),
+        AutostartAction::Disable
+    );
+    // 探测失败时保守回退为 Noop，不盲目覆写系统配置
+    assert_eq!(
+        determine_autostart_action(true, Err("io error".to_string())),
+        AutostartAction::Noop
+    );
+    assert_eq!(
+        determine_autostart_action(false, Err("io error".to_string())),
+        AutostartAction::Noop
+    );
+}
 #[test]
 fn settings_corrupt_falls_back_and_rebuilds() {
     let dir = temp_dir("corrupt");

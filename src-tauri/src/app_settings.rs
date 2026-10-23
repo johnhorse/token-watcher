@@ -256,3 +256,37 @@ pub fn path_for_db(db_path: &Path) -> std::path::PathBuf {
         .unwrap_or_default()
         .join(FILE_NAME)
 }
+
+/// 开机自启系统同步动作
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutostartAction {
+    /// 触发启用自启
+    Enable,
+    /// 触发禁用自启
+    Disable,
+    /// 无需操作（状态已同步或查询失败保护）
+    Noop,
+}
+
+/// 判定开机自启同步动作：仅在系统实际状态与期望设置不一致时触发变更，
+/// 避免每次应用启动重复写入 LaunchAgent plist 引发 macOS 系统反复弹出“已添加后台项目”通知。
+pub fn determine_autostart_action(
+    desired: bool,
+    is_enabled_res: Result<bool, String>,
+) -> AutostartAction {
+    match is_enabled_res {
+        Ok(is_enabled) => {
+            if desired && !is_enabled {
+                AutostartAction::Enable
+            } else if !desired && is_enabled {
+                AutostartAction::Disable
+            } else {
+                AutostartAction::Noop
+            }
+        }
+        Err(e) => {
+            eprintln!("[token-watcher] 检查系统开机自启状态失败，维持现状: {e}");
+            AutostartAction::Noop
+        }
+    }
+}

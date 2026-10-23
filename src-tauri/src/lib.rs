@@ -96,18 +96,25 @@ pub fn run() {
             let settings_path = app_settings::path_for_db(&paths.db_path);
             let mut settings = AppSettings::load(&settings_path);
 
-            // 开机自启动同步：若 settings.autostart 为 None（首次运行），默认启用自启并持久化
+            // 开机自启动同步：仅在系统状态与期望设置不一致时触发变更，避免每次启动重写 LaunchAgent plist 触发 macOS 通知
             {
+                use app_settings::{determine_autostart_action, AutostartAction};
                 use tauri_plugin_autostart::ManagerExt;
                 let autolaunch = app.autolaunch();
+                let desired = settings.is_autostart_enabled();
+                let is_enabled_res = autolaunch.is_enabled().map_err(|e| e.to_string());
+                match determine_autostart_action(desired, is_enabled_res) {
+                    AutostartAction::Enable => {
+                        let _ = autolaunch.enable();
+                    }
+                    AutostartAction::Disable => {
+                        let _ = autolaunch.disable();
+                    }
+                    AutostartAction::Noop => {}
+                }
                 if settings.autostart.is_none() {
-                    let _ = autolaunch.enable();
-                    settings.autostart = Some(true);
+                    settings.autostart = Some(desired);
                     let _ = settings.save(&settings_path);
-                } else if settings.autostart == Some(true) {
-                    let _ = autolaunch.enable();
-                } else {
-                    let _ = autolaunch.disable();
                 }
             }
             let tray_tx = match tray::setup(app.handle(), &settings_path, &paths.db_path, &settings)

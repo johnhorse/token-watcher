@@ -105,7 +105,7 @@
     background: var(--text-2);
   }
   .more-row {
-    margin-top: 8px;
+    margin-top: 6px;
     display: flex;
     justify-content: flex-end;
   }
@@ -113,7 +113,7 @@
     font-size: 11px;
     color: var(--amber);
     cursor: pointer;
-    padding: 2px 4px;
+    padding: 1px 4px;
     border-radius: 2px;
     transition: opacity 0.15s ease;
   }

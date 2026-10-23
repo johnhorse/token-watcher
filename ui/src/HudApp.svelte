@@ -157,12 +157,19 @@
         : Math.max(180, Math.min(520, 180 + (count - 2) * 70));
       const targetHeight = sessionsCount > 1 ? 34 + (sessionsCount - 1) * 28 : 34;
       void adapter.resizeHud(targetWidth, targetHeight);
-    } else {
-      const sessionsCount = activeSessions.length;
-      const targetHeight = sessionsCount > 1 ? 390 + 36 + sessionsCount * 24 : 390;
-      void adapter.resizeHud(320, targetHeight);
-    }
-  });
+     } else {
+       const sessionsCount = activeSessions.length;
+       const hasMoreModels = (dashboard?.models?.length ?? 0) > 3;
+       let targetHeight = 390;
+       if (hasMoreModels) {
+         targetHeight += 22;
+       }
+       if (sessionsCount > 1) {
+         targetHeight += 35 + sessionsCount * 26;
+       }
+       void adapter.resizeHud(320, targetHeight);
+     }
+   });
 
   async function loadSummary(): Promise<void> {
     try {
@@ -375,8 +382,9 @@
     onpointerdown={handlePointerDown}
     onpointermove={handlePointerMove}
     onpointerup={handlePointerUp}
-    oncontextmenu={handleContextMenu}
-  >
+     oncontextmenu={handleContextMenu}
+     onwheel={(e) => e.preventDefault()}
+   >
     <!-- Header -->
     <header class="card-header">
       <div class="header-left">
@@ -518,9 +526,10 @@
     onpointerdown={handlePointerDown}
     onpointermove={handlePointerMove}
     onpointerup={handlePointerUp}
-    oncontextmenu={handleContextMenu}
-    title={activeSessions.length > 1 ? `今日: ${formatExact(summary.total_today)} tokens · ${activeSessions.length} 条激活会话` : `会话: ${formatExact(summary.session_total)} | 今日: ${formatExact(summary.total_today)} tokens`}
-  >
+     oncontextmenu={handleContextMenu}
+     onwheel={(e) => e.preventDefault()}
+     title={activeSessions.length > 1 ? `今日: ${formatExact(summary.total_today)} tokens · ${activeSessions.length} 条激活会话` : `会话: ${formatExact(summary.session_total)} | 今日: ${formatExact(summary.total_today)} tokens`}
+   >
     {#if activeSessions.length > 1}
       <div class="multi-sessions-list">
         {#each activeSessions as sess, idx}
@@ -600,21 +609,23 @@
   }
 
   /* ---------------- 极简胶囊条 (Capsule) ---------------- */
-  .hud-pill {
-    width: 100vw;
-    height: 100vh;
-    box-sizing: border-box;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 12px;
-    border-radius: 9999px;
-    background: rgba(22, 24, 29, var(--capsule-opacity, 0.90));
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
-    cursor: grab;
-    transition: border-color 0.15s ease, background 0.15s ease;
-  }
+   .hud-pill {
+     width: 100vw;
+     height: 100vh;
+     box-sizing: border-box;
+     display: flex;
+     align-items: center;
+     justify-content: space-between;
+     padding: 0 12px;
+     border-radius: 9999px;
+     background: rgba(22, 24, 29, var(--capsule-opacity, 0.90));
+     border: 1px solid rgba(255, 255, 255, 0.12);
+     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
+     cursor: grab;
+     overflow: hidden;
+     overscroll-behavior: none;
+     transition: border-color 0.15s ease, background 0.15s ease;
+   }
 
   .hud-pill:active {
     cursor: grabbing;
@@ -831,27 +842,22 @@
   }
 
   /* ---------------- 卡片小组件 (Widget) ---------------- */
-  .hud-card {
-    width: 100vw;
-    height: 100vh;
-    box-sizing: border-box;
-    display: flex;
-    flex-direction: column;
-    padding: 12px 14px 14px;
-    border-radius: 12px;
-    background: rgba(24, 26, 32, var(--widget-opacity, 0.95));
-    border: 1px solid var(--line-strong);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-    cursor: default;
-    overflow-y: auto;
-    overflow-x: hidden;
-    scrollbar-width: none;
-    transition: border-color 0.15s ease, background 0.15s ease;
-  }
-
-  .hud-card::-webkit-scrollbar {
-    display: none;
-  }
+   .hud-card {
+     width: 100vw;
+     height: 100vh;
+     box-sizing: border-box;
+     display: flex;
+     flex-direction: column;
+     padding: 10px 14px 12px;
+     border-radius: 12px;
+     background: rgba(24, 26, 32, var(--widget-opacity, 0.95));
+     border: 1px solid var(--line-strong);
+     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+     cursor: default;
+     overflow: hidden;
+     overscroll-behavior: none;
+     transition: border-color 0.15s ease, background 0.15s ease;
+   }
 
   .hud-card.pulsing {
     border-color: color-mix(in srgb, var(--accent) 50%, var(--line-strong));
@@ -865,7 +871,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 10px;
+    margin-bottom: 8px;
   }
 
   .header-left {
@@ -940,9 +946,9 @@
     cursor: grabbing;
   }
 
-  .card-totals {
-    margin-bottom: 10px;
-  }
+   .card-totals {
+     margin-bottom: 8px;
+   }
 
   .card-big {
     margin-bottom: 6px;
@@ -1041,21 +1047,21 @@
     color: #fca5a5;
   }
 
-  .card-chart {
-    border-top: 1px solid var(--line);
-    padding-top: 8px;
-    margin-bottom: 10px;
-  }
+   .card-chart {
+     border-top: 1px solid var(--line);
+     padding-top: 6px;
+     margin-bottom: 8px;
+   }
 
   .card-chart :global(.section) {
     border-top: none;
     padding: 0;
   }
 
-  .card-models {
-    border-top: 1px solid var(--line);
-    padding-top: 8px;
-  }
+   .card-models {
+     border-top: 1px solid var(--line);
+     padding-top: 6px;
+   }
 
   .card-models :global(.section) {
     border-top: none;
